@@ -1219,9 +1219,9 @@ function TrackSelectionDialog({
 
   return (
     <Dialog open={!!collection} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-xl max-h-[85vh] glass-strong border border-white/[0.08] text-foreground rounded-2xl flex flex-col p-4 md:p-6 overflow-hidden">
-        <DialogHeader className="flex flex-row items-center justify-between gap-3 pb-2 border-b border-white/[0.06] shrink-0">
-          <div className="flex items-center gap-3 min-w-0">
+      <DialogContent className="sm:max-w-2xl max-w-[calc(100%-1.5rem)] w-full max-h-[85vh] glass-strong border border-white/[0.08] text-foreground rounded-2xl flex flex-col p-4 sm:p-6 overflow-hidden">
+        <DialogHeader className="flex flex-row items-center justify-between gap-3 pb-3 border-b border-white/[0.06] shrink-0 min-w-0">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             <div className="w-12 h-12 rounded-xl bg-white/[0.04] overflow-hidden shrink-0">
               {getCoverUrl(collection.item, collection.type) ? (
                 <img
@@ -1235,11 +1235,11 @@ function TrackSelectionDialog({
                 </div>
               )}
             </div>
-            <div className="min-w-0">
-              <DialogTitle className="text-base md:text-lg font-semibold truncate">
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="text-base sm:text-lg font-semibold truncate pr-6">
                 {collection.item.title || collection.item.name}
               </DialogTitle>
-              <p className="text-xs text-muted-foreground truncate">
+              <p className="text-xs text-muted-foreground truncate mt-0.5">
                 {getArtistText(collection.item, collection.type)} · {tracks.length} tracks
               </p>
             </div>
@@ -1248,10 +1248,10 @@ function TrackSelectionDialog({
 
         {/* Toolbar */}
         {!isLoading && tracks.length > 0 && (
-          <div className="flex items-center justify-between py-2 border-b border-white/[0.04] shrink-0 text-xs">
+          <div className="flex items-center justify-between py-2 border-b border-white/[0.04] shrink-0 text-xs gap-2">
             <button
               onClick={onToggleSelectAll}
-              className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors font-medium"
+              className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors font-medium shrink-0"
             >
               {isAllSelected ? (
                 <CheckSquare className="w-4 h-4 text-primary" />
@@ -1264,16 +1264,17 @@ function TrackSelectionDialog({
               size="sm"
               onClick={onDownloadSelected}
               disabled={selectedTrackIds.length === 0}
-              className="h-8 rounded-lg bg-primary hover:brightness-110 text-xs font-semibold px-3 gap-1.5"
+              className="h-8 rounded-lg bg-primary hover:brightness-110 text-xs font-semibold px-3 gap-1.5 shrink-0"
             >
               <Download className="w-3.5 h-3.5" />
-              Download Selected ({selectedTrackIds.length})
+              <span className="hidden sm:inline">Download Selected</span>
+              <span>({selectedTrackIds.length})</span>
             </Button>
           </div>
         )}
 
         {/* Track List */}
-        <div className="flex-1 overflow-y-auto space-y-1.5 py-2">
+        <div className="flex-1 overflow-y-auto space-y-1.5 py-2 pr-1 smooth-scroll min-w-0">
           {isLoading ? (
             <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
               <Loader2 className="w-8 h-8 text-primary animate-spin" />
@@ -1296,7 +1297,7 @@ function TrackSelectionDialog({
                 <div
                   key={track.id || idx}
                   onClick={() => onToggleSelectTrack(String(track.id))}
-                  className={`flex items-center gap-3 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                  className={`flex items-center gap-2.5 sm:gap-3 p-2 sm:p-2.5 rounded-xl border transition-all cursor-pointer min-w-0 ${
                     isSelected
                       ? "bg-primary/10 border-primary/30"
                       : "bg-white/[0.02] border-white/[0.04] hover:bg-white/[0.04]"
@@ -1319,7 +1320,7 @@ function TrackSelectionDialog({
                     {trackNum}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs md:text-sm font-medium truncate text-foreground">
+                    <p className="text-xs sm:text-sm font-medium truncate text-foreground">
                       {track.title}
                     </p>
                     <p className="text-[11px] text-muted-foreground/70 truncate">
@@ -1327,7 +1328,7 @@ function TrackSelectionDialog({
                     </p>
                   </div>
                   {durText && (
-                    <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0">
+                    <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0 hidden sm:inline">
                       {durText}
                     </span>
                   )}
