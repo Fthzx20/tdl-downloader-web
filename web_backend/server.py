@@ -324,9 +324,15 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
 
         tasks = []
         for item in items:
-            tid = item["id"]
-            cb = create_progress_callback(task_id, str(tid)) if task_id else None
-            tasks.append(sem_download(tid, safe_album, cb))
+            track_info = item.get("item") if isinstance(item, dict) and "item" in item else item
+            if track_info and isinstance(track_info, dict) and "id" in track_info:
+                if track_info.get("type") in ["VIDEO", "Video", "MUSIC_VIDEO"]:
+                    continue
+                if track_info.get("streamReady") is False or track_info.get("allowStreaming") is False:
+                    continue
+                tid = track_info["id"]
+                cb = create_progress_callback(task_id, str(tid)) if task_id else None
+                tasks.append(sem_download(tid, safe_album, cb))
             
         downloaded_paths = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -373,8 +379,12 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
 
         tasks = []
         for item in items:
-            track_info = item.get("item") if "item" in item else item
-            if track_info and "id" in track_info:
+            track_info = item.get("item") if isinstance(item, dict) and "item" in item else item
+            if track_info and isinstance(track_info, dict) and "id" in track_info:
+                if track_info.get("type") in ["VIDEO", "Video", "MUSIC_VIDEO"]:
+                    continue
+                if track_info.get("streamReady") is False or track_info.get("allowStreaming") is False:
+                    continue
                 tid = track_info["id"]
                 cb = create_progress_callback(task_id, str(tid)) if task_id else None
                 tasks.append(sem_download(tid, safe_playlist, cb))

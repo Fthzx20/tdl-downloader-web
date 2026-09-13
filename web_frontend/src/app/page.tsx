@@ -511,7 +511,14 @@ export default function Home() {
       const collectionId = item.id || item.uuid;
       const res = collectionType === "albums" ? await getAlbumTracks(collectionId) : await getPlaylistTracks(collectionId);
       const rawItems = res.items || [];
-      const tracks = rawItems.map((t: any) => (t.item ? t.item : t)).filter((t: any) => t && t.id);
+      const tracks = rawItems
+        .map((t: any) => (t.item ? t.item : t))
+        .filter((t: any) => {
+          if (!t || !t.id) return false;
+          if (t.type === "VIDEO" || t.type === "Video" || t.type === "MUSIC_VIDEO") return false;
+          if (t.streamReady === false || t.allowStreaming === false) return false;
+          return true;
+        });
       setCollectionTracks(tracks);
       setSelectedTrackIds(tracks.map((t: any) => String(t.id)));
     } catch (err: any) {

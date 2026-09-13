@@ -110,7 +110,10 @@ class DownloadManager:
         if progress_callback:
             await progress_callback(0, 1, "Fetching stream URL...")
             
-        stream_info = await self.api.get_stream_info(track_id, quality)
+        try:
+            stream_info = await self.api.get_stream_info(track_id, quality)
+        except Exception as e:
+            raise Exception(f'"{title}" by {artist_name} is unavailable or region-restricted on Tidal.')
         ext = stream_info["extension"]
         
         filename = f"{track_num:02d} - {safe_title}.{ext}"
