@@ -64,3 +64,16 @@ export async function getProgress(taskId: string) {
   if (!res.ok) throw new Error("Failed to fetch progress");
   return res.json();
 }
+
+export async function getAlbumTracks(albumId: string) {
+  const res = await fetch(`${API_BASE}/album/${albumId}/tracks`);
+  if (!res.ok) throw new Error("Failed to fetch album tracks");
+  return res.json();
+}
+
+export async function getPlaylistTracks(playlistId: string) {
+  const res = await fetch(`${API_BASE}/playlist/${playlistId}/tracks`);
+  if (!res.ok) throw new Error("Failed to fetch playlist tracks");
+  return res.json();
+}
+

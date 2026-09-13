@@ -20,6 +20,11 @@ import {
   CheckCircle2,
   AlertCircle,
   ChevronDown,
+  RotateCcw,
+  Trash2,
+  List,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import {
   getAuthStatus,
@@ -31,6 +36,8 @@ import {
   getSettings,
   updateSettings,
   getProgress,
+  getAlbumTracks,
+  getPlaylistTracks,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
@@ -57,6 +64,8 @@ type ActiveDownload = {
   speedText?: string;
   isComplete: boolean;
   isError: boolean;
+  item?: any;
+  itemType?: string;
 };
 
 /* ─── Helper: Get cover image URL from Tidal data ─── */
@@ -136,6 +145,12 @@ export default function Home() {
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([]);
   const [showDownloads, setShowDownloads] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
+
+  // Track Selector Modal State
+  const [selectedCollection, setSelectedCollection] = useState<{ type: "albums" | "playlists"; item: any } | null>(null);
+  const [collectionTracks, setCollectionTracks] = useState<any[]>([]);
+  const [isLoadingCollectionTracks, setIsLoadingCollectionTracks] = useState(false);
+  const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
 
   /* ─── Effects ─── */
   useEffect(() => {
@@ -341,9 +356,9 @@ export default function Home() {
     }
   };
 
-  const handleDownload = async (item: any) => {
+  const handleDownload = async (item: any, overrideType?: string) => {
     const downloadType =
-      type === "tracks" ? "track" : type === "albums" ? "album" : "playlist";
+      overrideType || (type === "tracks" ? "track" : type === "albums" ? "album" : "playlist");
     const taskId = Math.random().toString(36).substring(7);
     const itemId = item.id || item.uuid;
     const url = `${getDownloadUrl(downloadType, itemId)}?task_id=${taskId}`;
@@ -359,12 +374,21 @@ export default function Home() {
         statusText: "Preparing...",
         isComplete: false,
         isError: false,
+        item,
+        itemType: downloadType,
       },
     ]);
 
     try {
       const response = await fetch(url);
-      if (!response.ok) throw new Error("Download failed");
+      if (!response.ok) {
+        let errDetail = "Download failed";
+        try {
+          const body = await response.json();
+          errDetail = body.detail || errDetail;
+        } catch {}
+        throw new Error(errDetail);
+      }
 
       const contentLength = response.headers.get("Content-Length");
       const total = contentLength ? parseInt(contentLength, 10) : 0;
@@ -420,13 +444,66 @@ export default function Home() {
         progress: 100,
       });
       toast.success(`Downloaded "${itemTitle}"`);
-    } catch {
+    } catch (err: any) {
+      const msg = err?.message || `Failed to download "${itemTitle}"`;
       updateDownload(taskId, {
         statusText: "Failed",
         isError: true,
         isComplete: true,
       });
-      toast.error(`Failed to download "${itemTitle}"`);
+      toast.error(msg);
+    }
+  };
+
+  const clearCompletedDownloads = () => {
+    setActiveDownloads((prev) => prev.filter((d) => !d.isComplete));
+    toast.success("Download history cleared");
+  };
+
+  const handleOpenCollection = async (item: any, collectionType: "albums" | "playlists") => {
+    setSelectedCollection({ type: collectionType, item });
+    setIsLoadingCollectionTracks(true);
+    setCollectionTracks([]);
+    setSelectedTrackIds([]);
+    try {
+      const collectionId = item.id || item.uuid;
+      const res = collectionType === "albums" ? await getAlbumTracks(collectionId) : await getPlaylistTracks(collectionId);
+      const rawItems = res.items || [];
+      const tracks = rawItems.map((t: any) => (t.item ? t.item : t)).filter((t: any) => t && t.id);
+      setCollectionTracks(tracks);
+      setSelectedTrackIds(tracks.map((t: any) => String(t.id)));
+    } catch {
+      toast.error("Failed to load tracklist");
+    } finally {
+      setIsLoadingCollectionTracks(false);
+    }
+  };
+
+  const handleToggleSelectTrack = (trackId: string) => {
+    setSelectedTrackIds((prev) =>
+      prev.includes(trackId) ? prev.filter((id) => id !== trackId) : [...prev, trackId]
+    );
+  };
+
+  const handleToggleSelectAllTracks = () => {
+    if (selectedTrackIds.length === collectionTracks.length) {
+      setSelectedTrackIds([]);
+    } else {
+      setSelectedTrackIds(collectionTracks.map((t) => String(t.id)));
+    }
+  };
+
+  const handleDownloadSelectedTracks = async () => {
+    if (selectedTrackIds.length === 0) {
+      toast.error("Select at least one track to download");
+      return;
+    }
+    const tracksToDownload = collectionTracks.filter((t) => selectedTrackIds.includes(String(t.id)));
+    setSelectedCollection(null);
+    toast.info(`Queued ${tracksToDownload.length} tracks for download`);
+    for (const track of tracksToDownload) {
+      handleDownload(track, "track");
+      await new Promise((r) => setTimeout(r, 400));
     }
   };
 
@@ -800,16 +877,36 @@ export default function Home() {
                           )}
                         </div>
 
-                        {/* Download button — visible on mobile always, on desktop on hover */}
+                        {/* Action buttons — visible on mobile always, on desktop on hover */}
                         {type !== "artists" && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="w-9 h-9 md:w-10 md:h-10 rounded-xl shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-90"
-                            onClick={() => handleDownload(item)}
-                          >
-                            <Download className="w-4 h-4" />
-                          </Button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {(type === "albums" || type === "playlists") && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="w-9 h-9 md:w-10 md:h-10 rounded-xl shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-90"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenCollection(item, type as "albums" | "playlists");
+                                }}
+                                title="View & select tracks"
+                              >
+                                <ListMusic className="w-4 h-4" />
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="w-9 h-9 md:w-10 md:h-10 rounded-xl shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-90"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDownload(item);
+                              }}
+                              title={type === "tracks" ? "Download track" : "Download full zip"}
+                            >
+                              <Download className="w-4 h-4" />
+                            </Button>
+                          </div>
                         )}
                       </div>
                     ))
@@ -844,6 +941,21 @@ export default function Home() {
       </main>
 
       {/* ════════════════════════════════════════════════════════════════════
+          TRACK SELECTION DIALOG
+      ════════════════════════════════════════════════════════════════════ */}
+      <TrackSelectionDialog
+        collection={selectedCollection}
+        tracks={collectionTracks}
+        isLoading={isLoadingCollectionTracks}
+        selectedTrackIds={selectedTrackIds}
+        onToggleSelectTrack={handleToggleSelectTrack}
+        onToggleSelectAll={handleToggleSelectAllTracks}
+        onDownloadSelected={handleDownloadSelectedTracks}
+        onSingleDownload={(track) => handleDownload(track, "track")}
+        onClose={() => setSelectedCollection(null)}
+      />
+
+      {/* ════════════════════════════════════════════════════════════════════
           TRANSFER MANAGER — Floating Panel
       ════════════════════════════════════════════════════════════════════ */}
       {showDownloads && (
@@ -861,14 +973,27 @@ export default function Home() {
                 </span>
               )}
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="w-7 h-7 rounded-full hover:bg-white/10"
-              onClick={() => setShowDownloads(false)}
-            >
-              <X className="w-3.5 h-3.5" />
-            </Button>
+            <div className="flex items-center gap-1">
+              {activeDownloads.some((d) => d.isComplete) && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="w-7 h-7 rounded-full hover:bg-white/10 text-muted-foreground hover:text-foreground"
+                  onClick={clearCompletedDownloads}
+                  title="Clear history"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="w-7 h-7 rounded-full hover:bg-white/10"
+                onClick={() => setShowDownloads(false)}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           </div>
 
           {/* Download Items */}
@@ -913,6 +1038,17 @@ export default function Home() {
                           {d.statusText}
                         </span>
                       </div>
+                      {d.isError && d.item && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="w-7 h-7 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 shrink-0"
+                          onClick={() => handleDownload(d.item, d.itemType)}
+                          title="Retry download"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
                       <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0 tabular-nums">
                         {d.progress}%
                       </span>
@@ -1051,5 +1187,168 @@ function SettingsDialog({
         </div>
       </div>
     </DialogContent>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   TRACK SELECTION DIALOG (For Albums & Playlists)
+════════════════════════════════════════════════════════════════════════ */
+function TrackSelectionDialog({
+  collection,
+  tracks,
+  isLoading,
+  selectedTrackIds,
+  onToggleSelectTrack,
+  onToggleSelectAll,
+  onDownloadSelected,
+  onSingleDownload,
+  onClose,
+}: {
+  collection: { type: "albums" | "playlists"; item: any } | null;
+  tracks: any[];
+  isLoading: boolean;
+  selectedTrackIds: string[];
+  onToggleSelectTrack: (id: string) => void;
+  onToggleSelectAll: () => void;
+  onDownloadSelected: () => void;
+  onSingleDownload: (track: any) => void;
+  onClose: () => void;
+}) {
+  if (!collection) return null;
+  const isAllSelected = tracks.length > 0 && selectedTrackIds.length === tracks.length;
+
+  return (
+    <Dialog open={!!collection} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-xl max-h-[85vh] glass-strong border border-white/[0.08] text-foreground rounded-2xl flex flex-col p-4 md:p-6 overflow-hidden">
+        <DialogHeader className="flex flex-row items-center justify-between gap-3 pb-2 border-b border-white/[0.06] shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-12 h-12 rounded-xl bg-white/[0.04] overflow-hidden shrink-0">
+              {getCoverUrl(collection.item, collection.type) ? (
+                <img
+                  src={getCoverUrl(collection.item, collection.type)!}
+                  alt={collection.item.title || collection.item.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                  <Music className="w-6 h-6 text-primary" />
+                </div>
+              )}
+            </div>
+            <div className="min-w-0">
+              <DialogTitle className="text-base md:text-lg font-semibold truncate">
+                {collection.item.title || collection.item.name}
+              </DialogTitle>
+              <p className="text-xs text-muted-foreground truncate">
+                {getArtistText(collection.item, collection.type)} · {tracks.length} tracks
+              </p>
+            </div>
+          </div>
+        </DialogHeader>
+
+        {/* Toolbar */}
+        {!isLoading && tracks.length > 0 && (
+          <div className="flex items-center justify-between py-2 border-b border-white/[0.04] shrink-0 text-xs">
+            <button
+              onClick={onToggleSelectAll}
+              className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors font-medium"
+            >
+              {isAllSelected ? (
+                <CheckSquare className="w-4 h-4 text-primary" />
+              ) : (
+                <Square className="w-4 h-4 text-muted-foreground/60" />
+              )}
+              {isAllSelected ? "Deselect All" : "Select All"} ({selectedTrackIds.length}/{tracks.length})
+            </button>
+            <Button
+              size="sm"
+              onClick={onDownloadSelected}
+              disabled={selectedTrackIds.length === 0}
+              className="h-8 rounded-lg bg-primary hover:brightness-110 text-xs font-semibold px-3 gap-1.5"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download Selected ({selectedTrackIds.length})
+            </Button>
+          </div>
+        )}
+
+        {/* Track List */}
+        <div className="flex-1 overflow-y-auto space-y-1.5 py-2">
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+              <Loader2 className="w-8 h-8 text-primary animate-spin" />
+              <p className="text-xs">Fetching tracks from Tidal...</p>
+            </div>
+          ) : tracks.length === 0 ? (
+            <div className="text-center py-12 text-muted-foreground/60 text-xs">
+              No tracks found in this collection.
+            </div>
+          ) : (
+            tracks.map((track, idx) => {
+              const isSelected = selectedTrackIds.includes(String(track.id));
+              const trackNum = track.trackNumber || idx + 1;
+              const durSec = track.duration;
+              const durText = durSec
+                ? `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, "0")}`
+                : "";
+
+              return (
+                <div
+                  key={track.id || idx}
+                  onClick={() => onToggleSelectTrack(String(track.id))}
+                  className={`flex items-center gap-3 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                    isSelected
+                      ? "bg-primary/10 border-primary/30"
+                      : "bg-white/[0.02] border-white/[0.04] hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleSelectTrack(String(track.id));
+                    }}
+                    className="shrink-0 text-muted-foreground"
+                  >
+                    {isSelected ? (
+                      <CheckSquare className="w-4 h-4 text-primary" />
+                    ) : (
+                      <Square className="w-4 h-4 text-muted-foreground/40" />
+                    )}
+                  </button>
+                  <span className="text-xs font-mono text-muted-foreground/50 w-5 shrink-0 text-right">
+                    {trackNum}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs md:text-sm font-medium truncate text-foreground">
+                      {track.title}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground/70 truncate">
+                      {track.artist?.name || track.artists?.map((a: any) => a.name).join(", ") || "Artist"}
+                    </p>
+                  </div>
+                  {durText && (
+                    <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0">
+                      {durText}
+                    </span>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="w-8 h-8 rounded-lg shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSingleDownload(track);
+                    }}
+                    title="Download track"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

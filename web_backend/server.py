@@ -349,6 +349,29 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/album/{album_id}/tracks")
+async def get_album_tracks_endpoint(album_id: str):
+    """Gets tracks listing for an album."""
+    require_auth()
+    try:
+        res = await api.get_album_tracks(album_id)
+        return {"items": res.get("items", [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/playlist/{playlist_id}/tracks")
+async def get_playlist_tracks_endpoint(playlist_id: str):
+    """Gets tracks listing for a playlist."""
+    require_auth()
+    try:
+        items = await api.get_playlist_tracks(playlist_id)
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class SettingsRequest(BaseModel):
     quality_tier: str | None = None
     allow_dolby_atmos: bool | None = None

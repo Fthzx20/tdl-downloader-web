@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import aiohttp
 import aiofiles
 import asyncio
@@ -8,6 +9,17 @@ import time
 import imageio_ffmpeg
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
+
+def get_ffmpeg_binary():
+    """Finds available ffmpeg binary from PATH or imageio_ffmpeg."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
 
 def sanitize_filename(name):
     """Sanitizes strings to be safe for file paths across Windows/macOS/Linux."""
@@ -66,11 +78,14 @@ class DownloadManager:
         # Smart Skip
         flac_path = os.path.join(album_dir, f"{track_num:02d} - {safe_title}.flac")
         m4a_path = os.path.join(album_dir, f"{track_num:02d} - {safe_title}.m4a")
-        if (os.path.exists(flac_path) and os.path.getsize(flac_path) > 0) or \
-           (os.path.exists(m4a_path) and os.path.getsize(m4a_path) > 0):
+        if os.path.exists(flac_path) and os.path.getsize(flac_path) > 0:
             if progress_callback:
                 await progress_callback(1, 1, "Skipped (Already Downloaded)")
-            return
+            return flac_path
+        if os.path.exists(m4a_path) and os.path.getsize(m4a_path) > 0:
+            if progress_callback:
+                await progress_callback(1, 1, "Skipped (Already Downloaded)")
+            return m4a_path
             
         # 1.5 Fetch Lyrics
         lyrics_text = ""
@@ -121,12 +136,18 @@ class DownloadManager:
                             
                         async with session.get(url, headers=headers) as resp:
                             resp.raise_for_status()
-                            total_size = int(resp.headers.get("Content-Length", 0)) + downloaded
+                            if resp.status == 206:
+                                mode = "ab"
+                                total_size = int(resp.headers.get("Content-Length", 0)) + downloaded
+                            else:
+                                downloaded = 0
+                                mode = "wb"
+                                total_size = int(resp.headers.get("Content-Length", 0))
+
                             last_time = time.time()
                             last_downloaded = downloaded
                             smoothed_speed = None
                             
-                            mode = "ab" if downloaded > 0 else "wb"
                             async with aiofiles.open(temp_path, mode) as f:
                                 async for chunk in resp.content.iter_chunked(1024 * 64):
                                     is_paused = self.is_paused or (task_state and task_state.get("is_paused", False))
@@ -230,41 +251,47 @@ class DownloadManager:
                                     raise e
                                 await asyncio.sleep(2)
                                 
-            # Convert/Extract if needed
-            if stream_info["type"] == "dash" and ext == "flac":
-                # DASH FLAC streams are encapsulated in MP4 containers. Extract the raw FLAC.
+            # Convert/Extract container if needed for DASH streams
+            if stream_info["type"] == "dash":
                 if progress_callback:
-                    await progress_callback(100, 100, "Extracting FLAC stream from MP4 container...")
+                    await progress_callback(100, 100, "Processing audio container...")
                 
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-                raw_flac_path = final_path + ".raw.tmp"
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-f", "flac", raw_flac_path,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    
-                    async def wait_ffmpeg():
-                        return await proc.communicate()
+                ffmpeg_exe = get_ffmpeg_binary()
+                if ffmpeg_exe:
+                    raw_out_path = final_path + ".clean.tmp"
+                    try:
+                        if ext == "flac":
+                            cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-f", "flac", raw_out_path]
+                        else:
+                            cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-movflags", "+faststart", raw_out_path]
+
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
                         
-                    ff_task = asyncio.create_task(wait_ffmpeg())
-                    while not ff_task.done():
-                        if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled:
-                            proc.kill()
-                            raise Exception("Cancelled by user during extraction")
-                        await asyncio.sleep(0.5)
-                        
-                    stdout, stderr = ff_task.result()
-                    if proc.returncode != 0:
-                        err_msg = stderr.decode().strip().split('\n')[-1] if stderr else "Unknown error"
-                        raise Exception(f"Failed to extract FLAC stream. FFmpeg error: {err_msg}")
-                        
-                    os.remove(temp_path)
-                    temp_path = raw_flac_path
-                except Exception as e:
-                    print(f"FFmpeg extraction failed: {e}")
-                    raise e
+                        async def wait_ffmpeg():
+                            return await proc.communicate()
+                            
+                        ff_task = asyncio.create_task(wait_ffmpeg())
+                        while not ff_task.done():
+                            if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled:
+                                proc.kill()
+                                raise Exception("Cancelled by user during extraction")
+                            await asyncio.sleep(0.5)
+                            
+                        stdout, stderr = ff_task.result()
+                        if proc.returncode == 0 and os.path.exists(raw_out_path) and os.path.getsize(raw_out_path) > 0:
+                            os.remove(temp_path)
+                            temp_path = raw_out_path
+                        else:
+                            err_msg = stderr.decode().strip().split('\n')[-1] if stderr else "Unknown error"
+                            print(f"FFmpeg remux warning: {err_msg}. Keeping original file.")
+                            if os.path.exists(raw_out_path):
+                                os.remove(raw_out_path)
+                    except Exception as e:
+                        print(f"FFmpeg processing failed: {e}")
 
             if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled:
                 raise Exception("Cancelled by user before tagging")
@@ -319,48 +346,71 @@ class DownloadManager:
             raise e
 
     def apply_metadata(self, filepath, ext, tags):
-        """Applies metadata tags and cover art to the file."""
-        cover_bytes = tags.get("cover_bytes")
-        
-        if ext == "flac":
-            audio = FLAC(filepath)
-            audio["title"] = tags["title"]
-            audio["artist"] = tags["artist"]
-            audio["album"] = tags["album"]
-            audio["tracknumber"] = str(tags["track_num"])
-            audio["totaltracks"] = str(tags["total_tracks"])
-            audio["discnumber"] = str(tags["disc_num"])
-            audio["date"] = tags["date"]
-            audio["genre"] = tags["genre"]
+        """Applies metadata tags and cover art to the file safely."""
+        try:
+            cover_bytes = tags.get("cover_bytes")
             
-            if cover_bytes:
-                picture = Picture()
-                picture.data = cover_bytes
-                picture.type = 3  # Front cover
-                picture.mime = "image/jpeg"
-                picture.desc = "Front Cover"
-                audio.clear_pictures()
-                audio.add_picture(picture)
+            if ext == "flac":
+                try:
+                    audio = FLAC(filepath)
+                except Exception as e:
+                    print(f"Mutagen FLAC open error on {filepath}: {e}")
+                    return
+
+                audio["title"] = tags["title"]
+                audio["artist"] = tags["artist"]
+                audio["album"] = tags["album"]
+                audio["tracknumber"] = str(tags["track_num"])
+                audio["totaltracks"] = str(tags["total_tracks"])
+                audio["discnumber"] = str(tags["disc_num"])
+                if tags.get("date"):
+                    audio["date"] = tags["date"]
+                if tags.get("genre"):
+                    audio["genre"] = tags["genre"]
                 
-            if tags.get("lyrics"):
-                audio["UNSYNCEDLYRICS"] = tags["lyrics"]
+                if cover_bytes:
+                    try:
+                        picture = Picture()
+                        picture.data = cover_bytes
+                        picture.type = 3  # Front cover
+                        picture.mime = "image/jpeg"
+                        picture.desc = "Front Cover"
+                        audio.clear_pictures()
+                        audio.add_picture(picture)
+                    except Exception as e:
+                        print(f"Failed to attach cover to FLAC: {e}")
+                    
+                if tags.get("lyrics"):
+                    audio["UNSYNCEDLYRICS"] = tags["lyrics"]
+                    
+                audio.save()
                 
-            audio.save()
-            
-        elif ext == "m4a":
-            audio = MP4(filepath)
-            audio["\xa9nam"] = tags["title"]
-            audio["\xa9ART"] = tags["artist"]
-            audio["\xa9alb"] = tags["album"]
-            audio["trkn"] = [(tags["track_num"], tags["total_tracks"])]
-            audio["disk"] = [(tags["disc_num"], 1)]
-            audio["\xa9day"] = tags["date"]
-            audio["\xa9gen"] = tags["genre"]
-            
-            if cover_bytes:
-                audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
+            elif ext == "m4a":
+                try:
+                    audio = MP4(filepath)
+                except Exception as e:
+                    print(f"Mutagen MP4 open error on {filepath}: {e}")
+                    return
+
+                audio["\xa9nam"] = tags["title"]
+                audio["\xa9ART"] = tags["artist"]
+                audio["\xa9alb"] = tags["album"]
+                audio["trkn"] = [(tags["track_num"], tags["total_tracks"])]
+                audio["disk"] = [(tags["disc_num"], 1)]
+                if tags.get("date"):
+                    audio["\xa9day"] = tags["date"]
+                if tags.get("genre"):
+                    audio["\xa9gen"] = tags["genre"]
                 
-            if tags.get("lyrics"):
-                audio["\xa9lyr"] = tags["lyrics"]
-                
-            audio.save()
+                if cover_bytes:
+                    try:
+                        audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
+                    except Exception as e:
+                        print(f"Failed to attach cover to M4A: {e}")
+                    
+                if tags.get("lyrics"):
+                    audio["\xa9lyr"] = tags["lyrics"]
+                    
+                audio.save()
+        except Exception as e:
+            print(f"apply_metadata error: {e}")
