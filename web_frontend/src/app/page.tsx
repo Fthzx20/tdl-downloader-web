@@ -10,6 +10,7 @@ import {
   User,
   Loader2,
   LogIn,
+  LogOut,
   Settings,
   X,
   HardDriveDownload,
@@ -23,6 +24,7 @@ import {
 import {
   getAuthStatus,
   getLoginUrl,
+  logoutUser,
   search,
   getDownloadUrl,
   exchangeCode,
@@ -116,6 +118,7 @@ function getSubtitle(item: any, type: string): string {
 /* ─── Main Component ─── */
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userInfo, setUserInfo] = useState<{ username?: string; user_id?: string; country?: string } | null>(null);
   const [query, setQuery] = useState("");
   const [type, setType] = useState("tracks");
   const [results, setResults] = useState<any[]>([]);
@@ -139,12 +142,16 @@ export default function Home() {
     setHasMounted(true);
   }, []);
 
-  useEffect(() => {
-    // Seamless Auto-Login: Check backend for saved session token
+  const fetchAuth = useCallback(() => {
     getAuthStatus()
       .then((res) => {
         if (res.authenticated) {
           setIsAuthenticated(true);
+          setUserInfo({
+            username: res.username || (res.user_id ? `User #${res.user_id}` : "Tidal Account"),
+            user_id: res.user_id,
+            country: res.country,
+          });
           localStorage.setItem("tdl_auth", "true");
         } else {
           const stored = localStorage.getItem("tdl_auth");
@@ -158,11 +165,17 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // Seamless Auto-Login: Check backend for saved session token
+    fetchAuth();
+  }, [fetchAuth]);
+
+  useEffect(() => {
     if (isAuthenticated) {
       localStorage.setItem("tdl_auth", "true");
+      fetchAuth();
       getSettings().then(setSettings).catch(console.error);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, fetchAuth]);
 
   // Auto Refresh Search as user types (debounced live search)
   useEffect(() => {
@@ -272,6 +285,18 @@ export default function Home() {
         toast.error("Authentication failed. Make sure the URL is correct.")
       )
       .finally(() => setIsLoading(false));
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logoutUser();
+    } catch {
+      /* ignore error on network fail */
+    }
+    setIsAuthenticated(false);
+    setUserInfo(null);
+    localStorage.removeItem("tdl_auth");
+    toast.success("Logged out of Tidal");
   };
 
   const handleSearch = async (
@@ -540,10 +565,38 @@ export default function Home() {
           </Button>
         </nav>
 
-        {/* Settings at bottom */}
-        <div className="p-3 border-t border-white/[0.06]">
+        {/* Settings and Account at bottom */}
+        <div className="p-3 border-t border-white/[0.06] space-y-2">
+          {/* User Account Badge */}
+          {userInfo && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
+                  <User className="w-4 h-4 text-primary" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold truncate text-foreground">
+                    {userInfo.username || "Tidal Account"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/60 truncate">
+                    {userInfo.user_id ? `ID: ${userInfo.user_id}` : "Connected"}
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleLogout}
+                title="Log Out"
+                className="w-7 h-7 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0 ml-1"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          )}
+
           <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
-            <DialogTrigger className="w-full flex items-center justify-start px-3 font-medium h-10 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors text-sm">
+            <DialogTrigger className="w-full flex items-center justify-start px-3 font-medium h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors text-sm">
               <Settings className="w-4 h-4 mr-3" /> Settings
             </DialogTrigger>
             <SettingsDialog
@@ -563,7 +616,15 @@ export default function Home() {
             </div>
             <span className="font-bold text-base tracking-tight">TDL Rip</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
+            {userInfo && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.06]">
+                <User className="w-3.5 h-3.5 text-primary shrink-0" />
+                <span className="text-xs font-medium max-w-[90px] truncate text-foreground">
+                  {userInfo.username || "Tidal User"}
+                </span>
+              </div>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -586,6 +647,15 @@ export default function Home() {
                 onSettingChange={handleSettingChange}
               />
             </Dialog>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              title="Log Out"
+              className="w-9 h-9 rounded-full text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </Button>
           </div>
         </div>
       </div>
@@ -630,32 +700,36 @@ export default function Home() {
             <Tabs
               value={type}
               onValueChange={handleTabChange}
-              className="mb-6 flex justify-center"
+              className="mb-6 flex justify-center w-full"
             >
-              <TabsList className="bg-white/[0.04] p-1 rounded-xl h-auto flex-wrap border border-white/[0.06] justify-center mx-auto">
+              <TabsList className="grid grid-cols-4 w-full max-w-md mx-auto bg-white/[0.04] p-1 rounded-xl h-auto border border-white/[0.06]">
                 <TabsTrigger
                   value="tracks"
-                  className="rounded-lg px-3 md:px-5 py-2 text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary"
+                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
                 >
-                  <Music className="w-3.5 h-3.5 mr-1.5" /> Tracks
+                  <Music className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <span className="truncate">Tracks</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="albums"
-                  className="rounded-lg px-3 md:px-5 py-2 text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary"
+                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
                 >
-                  <Disc className="w-3.5 h-3.5 mr-1.5" /> Albums
+                  <Disc className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <span className="truncate">Albums</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="playlists"
-                  className="rounded-lg px-3 md:px-5 py-2 text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary"
+                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
                 >
-                  <ListMusic className="w-3.5 h-3.5 mr-1.5" /> Playlists
+                  <ListMusic className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <span className="truncate">Playlists</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="artists"
-                  className="rounded-lg px-3 md:px-5 py-2 text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary"
+                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
                 >
-                  <User className="w-3.5 h-3.5 mr-1.5" /> Artists
+                  <User className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <span className="truncate">Artists</span>
                 </TabsTrigger>
               </TabsList>
             </Tabs>

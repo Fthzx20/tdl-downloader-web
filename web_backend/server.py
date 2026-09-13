@@ -103,13 +103,36 @@ async def get_auth_status():
             # Auto-refresh if token is close to expiration (< 5 mins)
             if config.refresh_token and (config.token_expiry - time.time() < 300):
                 await api.refresh_token()
+            # Fetch username profile if missing
+            if not config.user_name and config.user_id:
+                try:
+                    user_info = await api._api_request("GET", f"users/{config.user_id}")
+                    if user_info:
+                        uname = user_info.get("username") or user_info.get("email") or user_info.get("firstName")
+                        if uname:
+                            config.user_name = str(uname)
+                            config.save()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Auto refresh on status check failed: {e}")
+            
+    display_name = config.user_name or (f"User #{config.user_id}" if config.user_id else "Tidal User")
+    
     return {
         "authenticated": bool(config.access_token),
         "user_id": config.user_id,
+        "username": display_name,
         "country": api.country_code
     }
+
+
+@app.post("/auth/logout")
+@app.get("/auth/logout")
+def logout():
+    """Logs out the user and clears stored session tokens."""
+    config.clear_session()
+    return {"status": "success", "message": "Logged out successfully"}
 
 
 @app.get("/auth/login_url")

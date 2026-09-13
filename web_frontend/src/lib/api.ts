@@ -12,6 +12,12 @@ export async function getLoginUrl() {
   return res.json();
 }
 
+export async function logoutUser() {
+  const res = await fetch(`${API_BASE}/auth/logout`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to log out");
+  return res.json();
+}
+
 export async function exchangeCode(code: string) {
   const res = await fetch(`${API_BASE}/auth/exchange`, {
     method: "POST",
