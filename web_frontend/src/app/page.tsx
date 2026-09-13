@@ -179,8 +179,8 @@ export default function Home() {
           });
           localStorage.setItem("tdl_auth", "true");
         } else {
-          const stored = localStorage.getItem("tdl_auth");
-          if (stored) setIsAuthenticated(true);
+          setIsAuthenticated(false);
+          localStorage.removeItem("tdl_auth");
         }
       })
       .catch(() => {
