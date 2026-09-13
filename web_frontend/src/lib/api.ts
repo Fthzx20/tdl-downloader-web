@@ -30,7 +30,12 @@ export async function exchangeCode(code: string) {
 
 export async function search(query: string, type: string) {
   const res = await fetch(`${API_BASE}/search?query=${encodeURIComponent(query)}&type=${type}`);
-  if (!res.ok) throw new Error("Search failed");
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("NOT_AUTHENTICATED");
+    let detail = "Search failed";
+    try { const body = await res.json(); detail = body.detail || detail; } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 

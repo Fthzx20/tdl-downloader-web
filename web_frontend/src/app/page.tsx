@@ -312,8 +312,14 @@ export default function Home() {
         setType(data.resolved_type);
       }
       setResults(data.items || []);
-    } catch {
-      toast.error("Search failed. Check your backend connection.");
+    } catch (err: any) {
+      if (err?.message === "NOT_AUTHENTICATED") {
+        toast.error("Please log in to Tidal first. Open Settings → Account to connect.");
+        setIsAuthenticated(false);
+        localStorage.removeItem("tdl_auth");
+      } else {
+        toast.error("Search failed. Check your backend connection.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -524,7 +530,7 @@ export default function Home() {
      MAIN APP
   ════════════════════════════════════════════════════════════════════════ */
   return (
-    <div className="flex min-h-screen min-h-dvh bg-background relative">
+    <div className="flex min-h-screen min-h-dvh bg-background relative overflow-x-hidden">
       {/* ── Desktop Sidebar ── */}
       <aside className="w-[260px] border-r border-white/[0.06] bg-sidebar hidden lg:flex flex-col shrink-0 sticky top-0 h-screen">
         {/* Brand */}
@@ -602,6 +608,8 @@ export default function Home() {
             <SettingsDialog
               settings={settings}
               onSettingChange={handleSettingChange}
+              userInfo={userInfo}
+              onLogout={handleLogout}
             />
           </Dialog>
         </div>
@@ -616,15 +624,7 @@ export default function Home() {
             </div>
             <span className="font-bold text-base tracking-tight">TDL Rip</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            {userInfo && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.06]">
-                <User className="w-3.5 h-3.5 text-primary shrink-0" />
-                <span className="text-xs font-medium max-w-[90px] truncate text-foreground">
-                  {userInfo.username || "Tidal User"}
-                </span>
-              </div>
-            )}
+          <div className="flex items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
@@ -645,23 +645,16 @@ export default function Home() {
               <SettingsDialog
                 settings={settings}
                 onSettingChange={handleSettingChange}
+                userInfo={userInfo}
+                onLogout={handleLogout}
               />
             </Dialog>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleLogout}
-              title="Log Out"
-              className="w-9 h-9 rounded-full text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <LogOut className="w-4 h-4" />
-            </Button>
           </div>
         </div>
       </div>
 
       {/* ── Main Content ── */}
-      <main className="flex-1 flex flex-col min-w-0 relative">
+      <main className="flex-1 flex flex-col min-w-0 relative overflow-x-hidden">
         {/* Ambient glow */}
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-primary/[0.04] blur-[150px] rounded-full pointer-events-none" />
         <div className="absolute bottom-1/3 left-0 w-[400px] h-[400px] bg-chart-3/[0.03] blur-[120px] rounded-full pointer-events-none" />
@@ -953,16 +946,54 @@ export default function Home() {
 function SettingsDialog({
   settings,
   onSettingChange,
+  userInfo,
+  onLogout,
 }: {
   settings: { quality_tier: string; allow_dolby_atmos: boolean };
   onSettingChange: (key: string, value: any) => void;
+  userInfo?: { username?: string; user_id?: string; country?: string } | null;
+  onLogout?: () => void;
 }) {
   return (
     <DialogContent className="max-w-sm glass-strong border border-white/[0.08] text-foreground rounded-2xl">
       <DialogHeader>
-        <DialogTitle className="text-lg">Preferences</DialogTitle>
+        <DialogTitle className="text-lg">Settings</DialogTitle>
       </DialogHeader>
       <div className="space-y-5 pt-2">
+        {/* Account Section */}
+        {userInfo && (
+          <div className="space-y-2">
+            <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
+              Account
+            </Label>
+            <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
+                  <User className="w-4.5 h-4.5 text-primary" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold truncate text-foreground">
+                    {userInfo.username || "Tidal Account"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground/60 truncate">
+                    {userInfo.user_id ? `ID: ${userInfo.user_id}` : "Connected"}
+                    {userInfo.country ? ` · ${userInfo.country}` : ""}
+                  </p>
+                </div>
+              </div>
+              {onLogout && (
+                <button
+                  onClick={onLogout}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-destructive hover:bg-destructive/10 border border-destructive/20 transition-colors shrink-0 ml-2"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Logout
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Quality */}
         <div className="space-y-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">

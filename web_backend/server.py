@@ -34,6 +34,12 @@ TEMP_DIR = os.path.expanduser("~/Music/Tidal_Temp_Zips")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
+def require_auth():
+    """Raises 401 if not authenticated."""
+    if not config.access_token:
+        raise HTTPException(status_code=401, detail="Not authenticated. Please log in to Tidal first.")
+
+
 def parse_tidal_url(query: str):
     """Parses track, album, playlist, or artist links from Tidal, including raw playlist UUIDs."""
     if not query:
@@ -127,8 +133,7 @@ async def get_auth_status():
     }
 
 
-@app.post("/auth/logout")
-@app.get("/auth/logout")
+@app.api_route("/auth/logout", methods=["GET", "POST"])
 def logout():
     """Logs out the user and clears stored session tokens."""
     config.clear_session()
@@ -158,8 +163,12 @@ async def exchange_code(req: AuthCodeRequest):
 @app.get("/search")
 async def search(query: str, type: str = "tracks"):
     """Search Tidal catalog or resolve Tidal link/UUID."""
+    require_auth()
     try:
         query_str = query.strip()
+        if not query_str:
+            return {"items": []}
+            
         url_type, url_id = parse_tidal_url(query_str)
         
         if url_type:
@@ -180,23 +189,27 @@ async def search(query: str, type: str = "tracks"):
         res = await api.search(query_str, limit=50)
         
         # Extract category data
-        category_data = res.get(type, {})
+        category_data = res.get(type, {}) if isinstance(res.get(type), dict) else {}
         items = list(category_data.get("items", []))
         
         # Check topHit for exact match prioritization
-        top_hit = res.get("topHit", {})
-        if top_hit:
+        top_hit = res.get("topHit")
+        if top_hit and isinstance(top_hit, dict):
             top_hit_item = top_hit.get("value")
             top_hit_type = str(top_hit.get("type", "")).lower()
             
             # Match topHit type with request type (singular vs plural e.g. track vs tracks)
-            if top_hit_item and (top_hit_type == type or top_hit_type == type.rstrip("s")):
+            if top_hit_item and isinstance(top_hit_item, dict) and (top_hit_type == type or top_hit_type == type.rstrip("s")):
                 top_hit_id = top_hit_item.get("id")
-                items = [item for item in items if item.get("id") != top_hit_id]
-                items.insert(0, top_hit_item)
+                if top_hit_id is not None:
+                    items = [item for item in items if item.get("id") != top_hit_id]
+                    items.insert(0, top_hit_item)
             
         return {"items": items}
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -234,6 +247,7 @@ def get_progress(task_id: str):
 @app.get("/download/track/{track_id}")
 async def download_track(track_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads a single track and returns the audio file directly."""
+    require_auth()
     try:
         cb = create_progress_callback(task_id, track_id) if task_id else None
         final_path = await downloader.download_track(track_id, progress_callback=cb)
@@ -242,6 +256,8 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
             
         filename = os.path.basename(final_path)
         return FileResponse(final_path, media_type='application/octet-stream', filename=filename)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -249,6 +265,7 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
 @app.get("/download/album/{album_id}")
 async def download_album(album_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads an album, zips it, and returns the zip file."""
+    require_auth()
     try:
         album = await api.get_album(album_id)
         safe_album = album.get("title", "Album").replace("/", "_").replace("\\", "_")
@@ -292,6 +309,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
 @app.get("/download/playlist/{playlist_id}")
 async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads a playlist, zips it, and returns the zip file."""
+    require_auth()
     try:
         playlist = await api.get_playlist(playlist_id)
         safe_playlist = playlist.get("title", "Playlist").replace("/", "_").replace("\\", "_")
