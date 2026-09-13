@@ -49,16 +49,26 @@ class DownloadManager:
 
         # 1. Fetch Track & Album Metadata
         track = await self.api.get_track(track_id)
-        album_id = track["album"]["id"]
-        album = await self.api.get_album(album_id)
+        album_info = track.get("album") or {}
+        album_id = album_info.get("id")
+        
+        album = {}
+        if album_id:
+            try:
+                album = await self.api.get_album(album_id)
+            except Exception:
+                album = album_info
+        else:
+            album = album_info
         
         # Track details
-        title = track["title"]
-        artist_name = track["artist"]["name"]
-        album_title = album["title"]
-        track_num = track.get("trackNumber", 1)
-        total_tracks = album.get("numberOfTracks", 1)
-        disc_num = track.get("volumeNumber", 1)
+        title = track.get("title", "Untitled Track")
+        artist_obj = track.get("artist") or (track.get("artists", [{}])[0] if track.get("artists") else {})
+        artist_name = artist_obj.get("name", "Unknown Artist")
+        album_title = album.get("title", "Unknown Album")
+        track_num = track.get("trackNumber") or 1
+        total_tracks = album.get("numberOfTracks") or 1
+        disc_num = track.get("volumeNumber") or 1
         release_date = album.get("releaseDate", "")
         genre = album.get("genre", "")
         

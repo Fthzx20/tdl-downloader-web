@@ -342,7 +342,8 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
             
         album_dir = os.path.dirname(valid_paths[0])
         
-        zip_path = os.path.join(TEMP_DIR, f"{safe_album}.zip")
+        uid_tag = task_id if task_id else str(int(time.time() * 1000))
+        zip_path = os.path.join(TEMP_DIR, f"{safe_album}_{uid_tag}.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root_dir, dirs, files in os.walk(album_dir):
                 for file in files:
@@ -397,7 +398,8 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
             
         playlist_dir = os.path.dirname(valid_paths[0])
         
-        zip_path = os.path.join(TEMP_DIR, f"{safe_playlist}.zip")
+        uid_tag = task_id if task_id else str(int(time.time() * 1000))
+        zip_path = os.path.join(TEMP_DIR, f"{safe_playlist}_{uid_tag}.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root_dir, dirs, files in os.walk(playlist_dir):
                 for file in files:
