@@ -24,7 +24,10 @@ class TidalAPI:
     async def get_session(self):
         """Lazy-loaded aiohttp client session."""
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            # Set a timeout so we don't hang indefinitely on stalled connections
+            # total=None allows the download to take as long as it needs, as long as data is flowing
+            timeout = aiohttp.ClientTimeout(total=None, sock_read=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
     async def close(self):
@@ -56,10 +59,17 @@ class TidalAPI:
 
         try:
             async with session.request(method, url, headers=headers, params=request_params, json=json_data) as resp:
-                if resp.status == 401 and retry_auth and self.config.refresh_token:
+                # If we get 401 and we haven't recently refreshed the token (within the last 2 minutes)
+                recent_refresh = self.config.token_expiry > 0 and (time.time() < (self.config.token_expiry - 604680))
+                if resp.status == 401 and retry_auth and self.config.refresh_token and not recent_refresh:
                     # Token might have expired early or been revoked; attempt refresh once
                     print("Received 401. Attempting manual token refresh and retry...")
-                    await self.refresh_token()
+                    try:
+                        await self.refresh_token()
+                    except Exception as e:
+                        print(f"Manual token refresh failed: {e}")
+                        # Don't crash immediately, let the 401 be handled below
+                    
                     headers["Authorization"] = f"Bearer {self.config.access_token}"
                     async with session.request(method, url, headers=headers, params=request_params, json=json_data) as retry_resp:
                         if retry_resp.status >= 400:
