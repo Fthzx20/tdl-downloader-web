@@ -67,13 +67,23 @@ export async function getProgress(taskId: string) {
 
 export async function getAlbumTracks(albumId: string) {
   const res = await fetch(`${API_BASE}/album/${albumId}/tracks`);
-  if (!res.ok) throw new Error("Failed to fetch album tracks");
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("NOT_AUTHENTICATED");
+    let detail = "Failed to fetch album tracks";
+    try { const body = await res.json(); detail = body.detail || detail; } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 
 export async function getPlaylistTracks(playlistId: string) {
   const res = await fetch(`${API_BASE}/playlist/${playlistId}/tracks`);
-  if (!res.ok) throw new Error("Failed to fetch playlist tracks");
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("NOT_AUTHENTICATED");
+    let detail = "Failed to fetch playlist tracks";
+    try { const body = await res.json(); detail = body.detail || detail; } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 

@@ -472,8 +472,15 @@ export default function Home() {
       const tracks = rawItems.map((t: any) => (t.item ? t.item : t)).filter((t: any) => t && t.id);
       setCollectionTracks(tracks);
       setSelectedTrackIds(tracks.map((t: any) => String(t.id)));
-    } catch {
-      toast.error("Failed to load tracklist");
+    } catch (err: any) {
+      if (err?.message === "NOT_AUTHENTICATED") {
+        toast.error("Please log in to Tidal first. Open Settings → Account to connect.");
+        setIsAuthenticated(false);
+        localStorage.removeItem("tdl_auth");
+        setSelectedCollection(null);
+      } else {
+        toast.error(err?.message || "Failed to load tracklist");
+      }
     } finally {
       setIsLoadingCollectionTracks(false);
     }
@@ -772,33 +779,33 @@ export default function Home() {
               onValueChange={handleTabChange}
               className="mb-6 flex justify-center w-full"
             >
-              <TabsList className="grid grid-cols-4 w-full max-w-md mx-auto bg-white/[0.04] p-1 rounded-xl h-auto border border-white/[0.06]">
+              <TabsList className="grid grid-cols-4 w-full max-w-md mx-auto h-11 p-1 rounded-xl bg-white/[0.04] border border-white/[0.06]">
                 <TabsTrigger
                   value="tracks"
-                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
+                  className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
                 >
-                  <Music className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <Music className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block" />
                   <span className="truncate">Tracks</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="albums"
-                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
+                  className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
                 >
-                  <Disc className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <Disc className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block" />
                   <span className="truncate">Albums</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="playlists"
-                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
+                  className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
                 >
-                  <ListMusic className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <ListMusic className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block" />
                   <span className="truncate">Playlists</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="artists"
-                  className="rounded-lg px-1 sm:px-3 py-2 text-[11px] sm:text-xs md:text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary flex items-center justify-center min-w-0"
+                  className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
                 >
-                  <User className="w-3.5 h-3.5 mr-1 shrink-0 hidden sm:inline-block" />
+                  <User className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block" />
                   <span className="truncate">Artists</span>
                 </TabsTrigger>
               </TabsList>
