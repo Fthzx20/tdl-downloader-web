@@ -6,13 +6,14 @@ import zipfile
 import time
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from tidal_rip.config import Config
 from tidal_rip.api import TidalAPI
 from tidal_rip.downloader import DownloadManager, sanitize_filename
+from tidal_rip.r2_storage import R2StorageManager
 
 app = FastAPI(title="Tidal Rip Web API")
 
@@ -28,6 +29,7 @@ app.add_middleware(
 config = Config()
 api = TidalAPI(config)
 downloader = DownloadManager(api, config)
+r2_storage = R2StorageManager(config)
 
 # Make sure temp directory exists for zipping
 TEMP_DIR = os.path.expanduser("~/Music/Tidal_Temp_Zips")
@@ -299,9 +301,38 @@ def cleanup_empty_dir(path: str):
         pass
 
 
+async def serve_or_upload_r2(local_path: str, background_tasks: BackgroundTasks, cleanup_paths: list = None):
+    """If Cloudflare R2 is configured, uploads file to R2 and returns 307 redirect. Otherwise returns FileResponse with background cleanup."""
+    if r2_storage.is_configured():
+        try:
+            r2_url = await r2_storage.upload_and_get_url(local_path)
+            if cleanup_paths:
+                for cp in cleanup_paths:
+                    if os.path.isdir(cp):
+                        cleanup_dir(cp)
+                    elif os.path.exists(cp):
+                        cleanup_file(cp)
+            return RedirectResponse(url=r2_url, status_code=307)
+        except Exception as e:
+            print(f"R2 Upload failed, falling back to local serve: {e}")
+
+    filename = os.path.basename(local_path)
+    parent_dir = os.path.dirname(local_path)
+
+    background_tasks.add_task(cleanup_file, local_path)
+    if cleanup_paths:
+        for cp in cleanup_paths:
+            if os.path.exists(cp) and not os.path.isdir(cp):
+                background_tasks.add_task(cleanup_file, cp)
+    background_tasks.add_task(cleanup_empty_dir, parent_dir)
+
+    media_type = 'application/zip' if filename.endswith('.zip') else 'application/octet-stream'
+    return FileResponse(local_path, media_type=media_type, filename=filename)
+
+
 @app.get("/download/track/{track_id}")
 async def download_track(track_id: str, background_tasks: BackgroundTasks, task_id: str = None):
-    """Downloads a single track and returns the audio file directly."""
+    """Downloads a single track and returns the audio file directly or via R2 redirect."""
     require_auth()
     try:
         cb = create_progress_callback(task_id, track_id) if task_id else None
@@ -309,19 +340,10 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
         if not final_path or not os.path.exists(final_path):
             raise Exception("Download failed or skipped.")
             
-        filename = os.path.basename(final_path)
-        parent_dir = os.path.dirname(final_path)
-        
-        # Schedule cleanup AFTER the response is fully sent to the client
-        background_tasks.add_task(cleanup_file, final_path)
-        # Also cleanup the companion .lrc lyrics file
         lrc_path = os.path.splitext(final_path)[0] + ".lrc"
-        if os.path.exists(lrc_path):
-            background_tasks.add_task(cleanup_file, lrc_path)
-        # Cleanup empty directories to free disk space on Render
-        background_tasks.add_task(cleanup_empty_dir, parent_dir)
+        cleanup_paths = [lrc_path] if os.path.exists(lrc_path) else []
         
-        return FileResponse(final_path, media_type='application/octet-stream', filename=filename)
+        return await serve_or_upload_r2(final_path, background_tasks, cleanup_paths=cleanup_paths)
     except HTTPException:
         raise
     except Exception as e:
@@ -331,7 +353,7 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
 
 @app.get("/download/album/{album_id}")
 async def download_album(album_id: str, background_tasks: BackgroundTasks, task_id: str = None):
-    """Downloads an album, zips it, and returns the zip file."""
+    """Downloads an album, zips it, and returns the zip file or R2 redirect."""
     require_auth()
     try:
         # Free disk space before a large download operation
@@ -380,10 +402,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
                     arcname = os.path.relpath(file_path, album_dir)
                     zipf.write(file_path, arcname)
                     
-        background_tasks.add_task(cleanup_dir, album_dir)
-        background_tasks.add_task(cleanup_file, zip_path)
-        
-        return FileResponse(zip_path, media_type='application/zip', filename=f"{safe_album}.zip")
+        return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[album_dir])
     except HTTPException:
         raise
     except Exception as e:
@@ -392,7 +411,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
 
 @app.get("/download/playlist/{playlist_id}")
 async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks, task_id: str = None):
-    """Downloads a playlist, zips it, and returns the zip file."""
+    """Downloads a playlist, zips it, and returns the zip file or R2 redirect."""
     require_auth()
     try:
         # Free disk space before a large download operation
@@ -439,10 +458,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
                     arcname = os.path.relpath(file_path, playlist_dir)
                     zipf.write(file_path, arcname)
                     
-        background_tasks.add_task(cleanup_dir, playlist_dir)
-        background_tasks.add_task(cleanup_file, zip_path)
-        
-        return FileResponse(zip_path, media_type='application/zip', filename=f"{safe_playlist}.zip")
+        return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[playlist_dir])
     except HTTPException:
         raise
     except Exception as e:
@@ -474,13 +490,28 @@ async def get_playlist_tracks_endpoint(playlist_id: str):
 class SettingsRequest(BaseModel):
     quality_tier: str | None = None
     allow_dolby_atmos: bool | None = None
+    r2_enabled: bool | None = None
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket_name: str | None = None
+    r2_public_domain: str | None = None
 
 @app.get("/settings")
 def get_settings():
+    sec_key = config.r2_secret_access_key
+    masked_key = (sec_key[:4] + "****" + sec_key[-4:]) if len(sec_key) > 8 else ("****" if sec_key else "")
     return {
         "quality_tier": config.quality_tier,
         "allow_dolby_atmos": config.allow_dolby_atmos,
-        "download_directory": config.download_directory
+        "download_directory": config.download_directory,
+        "r2_enabled": config.r2_enabled,
+        "r2_account_id": config.r2_account_id,
+        "r2_access_key_id": config.r2_access_key_id,
+        "r2_secret_access_key": masked_key,
+        "r2_bucket_name": config.r2_bucket_name,
+        "r2_public_domain": config.r2_public_domain,
+        "r2_configured": r2_storage.is_configured()
     }
 
 @app.post("/settings")
@@ -489,8 +520,20 @@ def update_settings(req: SettingsRequest):
         config.quality_tier = req.quality_tier
     if req.allow_dolby_atmos is not None:
         config.allow_dolby_atmos = req.allow_dolby_atmos
+    if req.r2_enabled is not None:
+        config.r2_enabled = req.r2_enabled
+    if req.r2_account_id is not None:
+        config.r2_account_id = req.r2_account_id
+    if req.r2_access_key_id is not None:
+        config.r2_access_key_id = req.r2_access_key_id
+    if req.r2_secret_access_key is not None and "*" not in req.r2_secret_access_key:
+        config.r2_secret_access_key = req.r2_secret_access_key
+    if req.r2_bucket_name is not None:
+        config.r2_bucket_name = req.r2_bucket_name
+    if req.r2_public_domain is not None:
+        config.r2_public_domain = req.r2_public_domain
     config.save()
-    return {"status": "success"}
+    return {"status": "success", "r2_configured": r2_storage.is_configured()}
 
 if __name__ == "__main__":
     import uvicorn

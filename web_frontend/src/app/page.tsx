@@ -142,6 +142,13 @@ export default function Home() {
   const [settings, setSettings] = useState({
     quality_tier: "LOSSLESS",
     allow_dolby_atmos: false,
+    r2_enabled: false,
+    r2_account_id: "",
+    r2_access_key_id: "",
+    r2_secret_access_key: "",
+    r2_bucket_name: "",
+    r2_public_domain: "",
+    r2_configured: false,
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
@@ -1210,13 +1217,23 @@ function SettingsDialog({
   userInfo,
   onLogout,
 }: {
-  settings: { quality_tier: string; allow_dolby_atmos: boolean };
+  settings: {
+    quality_tier: string;
+    allow_dolby_atmos: boolean;
+    r2_enabled?: boolean;
+    r2_account_id?: string;
+    r2_access_key_id?: string;
+    r2_secret_access_key?: string;
+    r2_bucket_name?: string;
+    r2_public_domain?: string;
+    r2_configured?: boolean;
+  };
   onSettingChange: (key: string, value: any) => void;
   userInfo?: { username?: string; user_id?: string; country?: string } | null;
   onLogout?: () => void;
 }) {
   return (
-    <DialogContent className="max-w-sm glass-strong border border-white/[0.08] text-foreground rounded-2xl">
+    <DialogContent className="max-w-md glass-strong border border-white/[0.08] text-foreground rounded-2xl max-h-[85vh] overflow-y-auto">
       <DialogHeader>
         <DialogTitle className="text-lg">Settings</DialogTitle>
       </DialogHeader>
@@ -1309,6 +1326,85 @@ function SettingsDialog({
               }`}
             />
           </button>
+        </div>
+
+        {/* Cloudflare R2 Bucket Section */}
+        <div className="space-y-3 pt-2 border-t border-white/[0.06]">
+          <div className="flex items-center justify-between">
+            <div>
+              <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 flex items-center gap-1.5">
+                Cloudflare R2 Bucket Dump
+                {settings.r2_configured && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                    Active
+                  </span>
+                )}
+              </Label>
+              <p className="text-[11px] text-muted-foreground/60 mt-0.5">
+                Temporary dump storage for large downloads
+              </p>
+            </div>
+            <button
+              onClick={() => onSettingChange("r2_enabled", !settings.r2_enabled)}
+              className={`w-11 h-6 rounded-full relative transition-colors ${
+                settings.r2_enabled ? "bg-primary" : "bg-white/10"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                  settings.r2_enabled ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          {settings.r2_enabled && (
+            <div className="space-y-2.5 pt-1">
+              <div>
+                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Account ID</Label>
+                <Input
+                  type="text"
+                  placeholder="e.g. a1b2c3d4e5f6..."
+                  value={settings.r2_account_id || ""}
+                  onChange={(e) => onSettingChange("r2_account_id", e.target.value)}
+                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Access Key ID</Label>
+                <Input
+                  type="text"
+                  placeholder="R2 Access Key"
+                  value={settings.r2_access_key_id || ""}
+                  onChange={(e) => onSettingChange("r2_access_key_id", e.target.value)}
+                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Secret Access Key</Label>
+                <Input
+                  type="password"
+                  placeholder="R2 Secret Key"
+                  value={settings.r2_secret_access_key || ""}
+                  onChange={(e) => onSettingChange("r2_secret_access_key", e.target.value)}
+                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Bucket Name</Label>
+                <Input
+                  type="text"
+                  placeholder="e.g. tdl-temp-dump"
+                  value={settings.r2_bucket_name || ""}
+                  onChange={(e) => onSettingChange("r2_bucket_name", e.target.value)}
+                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </DialogContent>

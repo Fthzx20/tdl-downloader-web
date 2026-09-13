@@ -49,7 +49,16 @@ export async function getSettings() {
   return res.json();
 }
 
-export async function updateSettings(settings: { quality_tier?: string, allow_dolby_atmos?: boolean }) {
+export async function updateSettings(settings: {
+  quality_tier?: string;
+  allow_dolby_atmos?: boolean;
+  r2_enabled?: boolean;
+  r2_account_id?: string;
+  r2_access_key_id?: string;
+  r2_secret_access_key?: string;
+  r2_bucket_name?: string;
+  r2_public_domain?: string;
+}) {
   const res = await fetch(`${API_BASE}/settings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

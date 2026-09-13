@@ -42,6 +42,14 @@ class Config:
         self.login_browser = "Default Browser"
         self.allow_dolby_atmos = False
         
+        # Cloudflare R2 Settings
+        self.r2_enabled = os.environ.get("R2_ENABLED", "false").lower() == "true"
+        self.r2_account_id = os.environ.get("R2_ACCOUNT_ID", "")
+        self.r2_access_key_id = os.environ.get("R2_ACCESS_KEY_ID", "")
+        self.r2_secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+        self.r2_bucket_name = os.environ.get("R2_BUCKET_NAME", "")
+        self.r2_public_domain = os.environ.get("R2_PUBLIC_DOMAIN", "")
+
         self.load()
 
 
@@ -77,6 +85,18 @@ class Config:
             self.quality_tier = data.get("quality_tier", "LOSSLESS")
             self.login_browser = data.get("login_browser", "Default Browser")
             self.allow_dolby_atmos = data.get("allow_dolby_atmos", False)
+
+            # R2 Storage settings
+            self.r2_enabled = data.get("r2_enabled", self.r2_enabled)
+            self.r2_account_id = data.get("r2_account_id", self.r2_account_id)
+            self.r2_access_key_id = data.get("r2_access_key_id", self.r2_access_key_id)
+            self.r2_secret_access_key = data.get("r2_secret_access_key", self.r2_secret_access_key)
+            self.r2_bucket_name = data.get("r2_bucket_name", self.r2_bucket_name)
+            self.r2_public_domain = data.get("r2_public_domain", self.r2_public_domain)
+
+            # Auto-enable if all R2 credentials are present
+            if self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket_name:
+                self.r2_enabled = True
         except Exception as e:
             print(f"Error loading configuration: {e}")
 
@@ -94,7 +114,13 @@ class Config:
             "download_directory": self.download_directory,
             "quality_tier": self.quality_tier,
             "login_browser": self.login_browser,
-            "allow_dolby_atmos": self.allow_dolby_atmos
+            "allow_dolby_atmos": self.allow_dolby_atmos,
+            "r2_enabled": self.r2_enabled,
+            "r2_account_id": self.r2_account_id,
+            "r2_access_key_id": self.r2_access_key_id,
+            "r2_secret_access_key": self.r2_secret_access_key,
+            "r2_bucket_name": self.r2_bucket_name,
+            "r2_public_domain": self.r2_public_domain
         }
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:

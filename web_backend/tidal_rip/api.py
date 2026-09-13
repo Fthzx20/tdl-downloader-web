@@ -229,17 +229,24 @@ class TidalAPI:
         return await self._api_request("GET", f"albums/{album_id}")
 
     async def get_album_tracks(self, album_id):
-        """Gets all tracks on an album with automatic pagination."""
+        """Gets all tracks on an album with automatic unlimited pagination."""
         tracks = []
         limit = 100
         offset = 0
         while True:
             resp = await self._api_request("GET", f"albums/{album_id}/tracks", params={"limit": limit, "offset": offset})
+            if not isinstance(resp, dict):
+                break
             items = resp.get("items", [])
+            if not items:
+                break
             tracks.extend(items)
+            total = resp.get("totalNumberOfItems") or resp.get("totalNumberOfTracks")
+            if total and len(tracks) >= total:
+                break
             if len(items) < limit:
                 break
-            offset += limit
+            offset += len(items)
         return {"items": tracks}
 
     async def get_playlist(self, playlist_id):
@@ -247,18 +254,24 @@ class TidalAPI:
         return await self._api_request("GET", f"playlists/{playlist_id}")
 
     async def get_playlist_tracks(self, playlist_id):
-        """Gets all tracks in a playlist."""
-        # Handles pagination automatically if items exceed 100
+        """Gets all tracks in a playlist with automatic unlimited pagination."""
         tracks = []
         limit = 100
         offset = 0
         while True:
             resp = await self._api_request("GET", f"playlists/{playlist_id}/tracks", params={"limit": limit, "offset": offset})
+            if not isinstance(resp, dict):
+                break
             items = resp.get("items", [])
+            if not items:
+                break
             tracks.extend(items)
+            total = resp.get("totalNumberOfItems") or resp.get("totalNumberOfTracks")
+            if total and len(tracks) >= total:
+                break
             if len(items) < limit:
                 break
-            offset += limit
+            offset += len(items)
         return tracks
 
     async def get_artist(self, artist_id):
@@ -266,18 +279,24 @@ class TidalAPI:
         return await self._api_request("GET", f"artists/{artist_id}")
 
     async def get_artist_albums(self, artist_id):
-        """Gets all albums and singles/EPs for a specific artist."""
-        # Handles pagination for artist albums
+        """Gets all albums and singles/EPs for a specific artist with automatic unlimited pagination."""
         albums = []
         limit = 100
         offset = 0
         while True:
             resp = await self._api_request("GET", f"artists/{artist_id}/albums", params={"limit": limit, "offset": offset})
+            if not isinstance(resp, dict):
+                break
             items = resp.get("items", [])
+            if not items:
+                break
             albums.extend(items)
+            total = resp.get("totalNumberOfItems")
+            if total and len(albums) >= total:
+                break
             if len(items) < limit:
                 break
-            offset += limit
+            offset += len(items)
         return {"items": albums}
 
     # --- Stream manifest parser ---
