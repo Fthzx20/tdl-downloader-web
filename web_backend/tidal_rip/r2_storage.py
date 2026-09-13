@@ -7,6 +7,8 @@ class R2StorageManager:
 
     def __init__(self, config):
         self.config = config
+        self._s3_client = None
+        self._client_key = None
 
     def is_configured(self) -> bool:
         return bool(
@@ -21,15 +23,31 @@ class R2StorageManager:
         import boto3
         from botocore.config import Config as BotoConfig
 
-        endpoint_url = f"https://{self.config.r2_account_id.strip()}.r2.cloudflarestorage.com"
-        return boto3.client(
+        key = (
+            self.config.r2_account_id.strip(),
+            self.config.r2_access_key_id.strip(),
+            self.config.r2_secret_access_key.strip()
+        )
+        if self._s3_client is not None and self._client_key == key:
+            return self._s3_client
+
+        if self._s3_client is not None:
+            try:
+                self._s3_client.close()
+            except Exception:
+                pass
+
+        endpoint_url = f"https://{key[0]}.r2.cloudflarestorage.com"
+        self._s3_client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
-            aws_access_key_id=self.config.r2_access_key_id.strip(),
-            aws_secret_access_key=self.config.r2_secret_access_key.strip(),
+            aws_access_key_id=key[1],
+            aws_secret_access_key=key[2],
             config=BotoConfig(signature_version="s3v4"),
             region_name="auto"
         )
+        self._client_key = key
+        return self._s3_client
 
     def _upload_and_presign_sync(self, local_file_path: str, object_name: Optional[str] = None, expires_in: int = 3600) -> str:
         if not os.path.exists(local_file_path):

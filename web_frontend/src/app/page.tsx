@@ -385,8 +385,6 @@ export default function Home() {
     const url = `${getDownloadUrl(downloadType, itemId)}?task_id=${taskId}`;
     const itemTitle = item.title || item.name;
 
-    const controller = new AbortController();
-
     setShowDownloads(true);
     setActiveDownloads((prev) => [
       ...prev,
@@ -399,114 +397,21 @@ export default function Home() {
         isError: false,
         item,
         itemType: downloadType,
-        abortController: controller,
       },
     ]);
 
     try {
-      const response = await fetch(url, { signal: controller.signal });
-      if (!response.ok) {
-        if (response.status === 401) {
-          setIsAuthenticated(false);
-          localStorage.removeItem("tdl_auth");
-          throw new Error("Session expired. Please log in again.");
-        }
-        let errDetail = "Download failed";
-        try {
-          const body = await response.json();
-          errDetail = body.detail || errDetail;
-        } catch {}
-        throw new Error(errDetail);
-      }
-
-      const contentLength = response.headers.get("Content-Length");
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-      let loaded = 0;
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("Stream unavailable");
-
-      let chunks: BlobPart[] = [];
-      let startTime = Date.now();
-      let lastLoaded = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-
-        const now = Date.now();
-        if (now - startTime > 400) {
-          const speed = ((loaded - lastLoaded) / (now - startTime)) * 1000;
-          const speedMB = (speed / 1024 / 1024).toFixed(1);
-          const loadedMB = (loaded / 1024 / 1024).toFixed(1);
-          const percent = total ? Math.round((loaded / total) * 100) : 50;
-          updateDownload(taskId, {
-            progress: percent,
-            statusText: `${loadedMB} MB · ${speedMB} MB/s`,
-          });
-          startTime = now;
-          lastLoaded = loaded;
-        }
-      }
-
-      updateDownload(taskId, { progress: 100, statusText: "Saving..." });
-
-      const blob = new Blob(chunks);
-      // Release chunk references immediately to help GC during bulk downloads
-      chunks = [];
-
-      const objectUrl = window.URL.createObjectURL(blob);
+      // Trigger native browser download directly to stream to disk without loading file chunks into JS heap
       const a = document.createElement("a");
-      a.href = objectUrl;
-      const cd = response.headers.get("content-disposition");
-      let filename = `${itemTitle}.${downloadType === "track" ? "flac" : "zip"}`;
-      if (cd && cd.includes("filename=")) {
-        filename = cd.split("filename=")[1].replace(/"/g, "");
-      }
-      a.download = filename;
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      // Delay revokeObjectURL to give the browser time to initiate the save
-      setTimeout(() => window.URL.revokeObjectURL(objectUrl), 3000);
 
-      updateDownload(taskId, {
-        statusText: "Complete",
-        isComplete: true,
-        progress: 100,
-      });
-      toast.success(`Downloaded "${itemTitle}"`);
+      toast.success(`Queued download for "${itemTitle}"`);
     } catch (err: any) {
-      if (err?.name === "AbortError") {
-        updateDownload(taskId, {
-          statusText: "Cancelled",
-          isError: true,
-          isComplete: true,
-          progress: 0,
-        });
-        toast.info(`Cancelled download for "${itemTitle}"`);
-        return;
-      }
-
-      // Fallback for CORS policy block on Cloudflare R2 redirects
-      if (err?.name === "TypeError" || err?.message?.includes("fetch") || err?.message?.includes("CORS") || err?.message?.includes("Failed to fetch")) {
-        updateDownload(taskId, {
-          statusText: "Complete (Direct Download)",
-          isComplete: true,
-          progress: 100,
-        });
-        toast.success(`Downloading "${itemTitle}" via direct link...`);
-        const a = document.createElement("a");
-        a.href = url;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        return;
-      }
-
       const msg = err?.message || `Failed to download "${itemTitle}"`;
       updateDownload(taskId, {
         statusText: "Failed",

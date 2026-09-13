@@ -4,6 +4,7 @@ import shutil
 import asyncio
 import zipfile
 import time
+import gc
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -75,6 +76,8 @@ def cleanup_file(path: str):
             os.remove(path)
     except Exception as e:
         print(f"Failed to cleanup {path}: {e}")
+    finally:
+        gc.collect()
 
 
 def cleanup_dir(path: str):
@@ -84,6 +87,8 @@ def cleanup_dir(path: str):
             shutil.rmtree(path)
     except Exception as e:
         print(f"Failed to cleanup {path}: {e}")
+    finally:
+        gc.collect()
 
 
 def purge_stale_temp_cache(max_age_seconds: int = 900):
@@ -113,6 +118,7 @@ def purge_stale_temp_cache(max_age_seconds: int = 900):
                                 os.remove(fpath)
                         except Exception:
                             pass
+        gc.collect()
     except Exception as e:
         print(f"Error purging stale cache: {e}")
 
@@ -134,6 +140,7 @@ async def startup_event():
 def clear_cache_endpoint():
     """Manually purges temporary files, zip archives, and cached temp files."""
     purge_stale_temp_cache(max_age_seconds=0) # Clear all immediately
+    gc.collect()
     return {"status": "success", "message": "Server temporary cache cleared."}
 
 

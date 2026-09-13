@@ -28,7 +28,8 @@ class TidalAPI:
             # Set a timeout so we don't hang indefinitely on stalled connections
             # total=None allows the download to take as long as it needs, as long as data is flowing
             timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_connect=15, sock_read=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(limit=50, enable_cleanup_closed=True, ttl_dns_cache=300)
+            self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self.session
 
     async def close(self):
