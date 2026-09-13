@@ -388,6 +388,11 @@ export default function Home() {
     try {
       const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) {
+        if (response.status === 401) {
+          setIsAuthenticated(false);
+          localStorage.removeItem("tdl_auth");
+          throw new Error("Session expired. Please log in again.");
+        }
         let errDetail = "Download failed";
         try {
           const body = await response.json();
@@ -402,7 +407,7 @@ export default function Home() {
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Stream unavailable");
 
-      const chunks: BlobPart[] = [];
+      let chunks: BlobPart[] = [];
       let startTime = Date.now();
       let lastLoaded = 0;
 
@@ -430,6 +435,9 @@ export default function Home() {
       updateDownload(taskId, { progress: 100, statusText: "Saving..." });
 
       const blob = new Blob(chunks);
+      // Release chunk references immediately to help GC during bulk downloads
+      chunks = [];
+
       const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
@@ -442,7 +450,8 @@ export default function Home() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      window.URL.revokeObjectURL(objectUrl);
+      // Delay revokeObjectURL to give the browser time to initiate the save
+      setTimeout(() => window.URL.revokeObjectURL(objectUrl), 3000);
 
       updateDownload(taskId, {
         statusText: "Complete",
@@ -556,10 +565,50 @@ export default function Home() {
     }
     const tracksToDownload = collectionTracks.filter((t) => selectedTrackIds.includes(String(t.id)));
     setSelectedCollection(null);
-    toast.info(`Queued ${tracksToDownload.length} tracks for download`);
-    for (const track of tracksToDownload) {
-      await handleDownload(track, "track");
-      await new Promise((r) => setTimeout(r, 200));
+
+    const total = tracksToDownload.length;
+    let successCount = 0;
+    let failCount = 0;
+    const failedTracks: any[] = [];
+
+    toast.info(`Queued ${total} tracks for download`);
+
+    for (let i = 0; i < tracksToDownload.length; i++) {
+      const track = tracksToDownload[i];
+      try {
+        await handleDownload(track, "track");
+        successCount++;
+      } catch {
+        failCount++;
+        failedTracks.push(track);
+      }
+      // Breathing room: let the server clean up files and the browser GC blobs
+      if (i < tracksToDownload.length - 1) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    // Auto-retry failed tracks once
+    if (failedTracks.length > 0 && failedTracks.length < total) {
+      toast.info(`Retrying ${failedTracks.length} failed track(s)...`);
+      await new Promise((r) => setTimeout(r, 2000));
+      for (const track of failedTracks) {
+        try {
+          await handleDownload(track, "track");
+          successCount++;
+          failCount--;
+        } catch {
+          // Still failed after retry
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    // Summary toast
+    if (failCount > 0) {
+      toast.warning(`Batch complete: ${successCount} downloaded, ${failCount} failed out of ${total}`);
+    } else if (total > 1) {
+      toast.success(`All ${total} tracks downloaded successfully!`);
     }
   };
 

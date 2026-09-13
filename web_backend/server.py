@@ -284,6 +284,21 @@ def get_progress(task_id: str):
     
     return {"status": "active", "tracks": active_tasks[task_id]}
 
+def cleanup_empty_dir(path: str):
+    """Background task: removes a directory only if it's empty after file cleanup."""
+    try:
+        if path and os.path.exists(path) and os.path.isdir(path):
+            # Only remove if empty (no other tracks being processed)
+            if not os.listdir(path):
+                os.rmdir(path)
+                # Also try to clean parent if empty (Artist folder)
+                parent = os.path.dirname(path)
+                if parent and os.path.exists(parent) and os.path.isdir(parent) and not os.listdir(parent):
+                    os.rmdir(parent)
+    except Exception:
+        pass
+
+
 @app.get("/download/track/{track_id}")
 async def download_track(track_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads a single track and returns the audio file directly."""
@@ -295,6 +310,17 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
             raise Exception("Download failed or skipped.")
             
         filename = os.path.basename(final_path)
+        parent_dir = os.path.dirname(final_path)
+        
+        # Schedule cleanup AFTER the response is fully sent to the client
+        background_tasks.add_task(cleanup_file, final_path)
+        # Also cleanup the companion .lrc lyrics file
+        lrc_path = os.path.splitext(final_path)[0] + ".lrc"
+        if os.path.exists(lrc_path):
+            background_tasks.add_task(cleanup_file, lrc_path)
+        # Cleanup empty directories to free disk space on Render
+        background_tasks.add_task(cleanup_empty_dir, parent_dir)
+        
         return FileResponse(final_path, media_type='application/octet-stream', filename=filename)
     except HTTPException:
         raise
@@ -308,6 +334,9 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
     """Downloads an album, zips it, and returns the zip file."""
     require_auth()
     try:
+        # Free disk space before a large download operation
+        purge_stale_temp_cache(max_age_seconds=60)
+        
         album = await api.get_album(album_id)
         safe_album = sanitize_filename(album.get("title", "Album"))
         
@@ -317,7 +346,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         if not items:
             raise Exception("No tracks found on this album.")
             
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(2)
         async def sem_download(tid, parent, cb):
             async with sem:
                 return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
@@ -366,6 +395,9 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
     """Downloads a playlist, zips it, and returns the zip file."""
     require_auth()
     try:
+        # Free disk space before a large download operation
+        purge_stale_temp_cache(max_age_seconds=60)
+        
         playlist = await api.get_playlist(playlist_id)
         safe_playlist = sanitize_filename(playlist.get("title", "Playlist"))
         
@@ -373,7 +405,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         if not items:
             raise Exception("No tracks found in this playlist.")
             
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(2)
         async def sem_download(tid, parent, cb):
             async with sem:
                 return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
