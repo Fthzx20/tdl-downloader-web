@@ -488,6 +488,25 @@ export default function Home() {
         toast.info(`Cancelled download for "${itemTitle}"`);
         return;
       }
+
+      // Fallback for CORS policy block on Cloudflare R2 redirects
+      if (err?.name === "TypeError" || err?.message?.includes("fetch") || err?.message?.includes("CORS") || err?.message?.includes("Failed to fetch")) {
+        updateDownload(taskId, {
+          statusText: "Complete (Direct Download)",
+          isComplete: true,
+          progress: 100,
+        });
+        toast.success(`Downloading "${itemTitle}" via direct link...`);
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        return;
+      }
+
       const msg = err?.message || `Failed to download "${itemTitle}"`;
       updateDownload(taskId, {
         statusText: "Failed",
