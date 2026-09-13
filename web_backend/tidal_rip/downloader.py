@@ -214,7 +214,7 @@ class DownloadManager:
                     if init_url:
                         if progress_callback:
                             await progress_callback(0, total_segments, "Downloading initialization segment...")
-                        async with session.get(init_url) as resp:
+                        async with session.get(init_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                             resp.raise_for_status()
                             await f.write(await resp.read())
                     
@@ -284,17 +284,12 @@ class DownloadManager:
                             stderr=asyncio.subprocess.PIPE
                         )
                         
-                        async def wait_ffmpeg():
-                            return await proc.communicate()
-                            
-                        ff_task = asyncio.create_task(wait_ffmpeg())
-                        while not ff_task.done():
-                            if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled:
-                                proc.kill()
-                                raise Exception("Cancelled by user during extraction")
-                            await asyncio.sleep(0.5)
-                            
-                        stdout, stderr = ff_task.result()
+                        try:
+                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+                        except asyncio.TimeoutError:
+                            proc.kill()
+                            stdout, stderr = b"", b"FFmpeg remux timed out after 45s"
+
                         if proc.returncode == 0 and os.path.exists(raw_out_path) and os.path.getsize(raw_out_path) > 0:
                             os.remove(temp_path)
                             temp_path = raw_out_path
@@ -324,7 +319,7 @@ class DownloadManager:
                 # Retrieve album artwork
                 cover_url = f"https://resources.tidal.com/images/{cover_id.replace('-', '/')}/1280x1280.jpg"
                 try:
-                    async with session.get(cover_url) as resp:
+                    async with session.get(cover_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status == 200:
                             cover_bytes = await resp.read()
                 except Exception as e:
@@ -350,12 +345,14 @@ class DownloadManager:
             return final_path
             
         except Exception as e:
-            # Clean up temp file on failure
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
+            # Clean up temp file and ffmpeg clean temp file on failure
+            clean_temp = final_path + ".clean.tmp"
+            for p in (temp_path, clean_temp):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
             raise e
 
     def apply_metadata(self, filepath, ext, tags):

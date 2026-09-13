@@ -272,11 +272,11 @@ def create_progress_callback(task_id: str, track_id: str):
 
 @app.get("/progress/{task_id}")
 def get_progress(task_id: str):
-    # Clean up old tasks inactive for > 10 minutes (600s) to prevent memory leak
+    # Clean up old tasks inactive for > 10 minutes (600s) or empty tasks to prevent memory leak
     now = time.time()
     expired = [
         tid for tid, tracks in list(active_tasks.items())
-        if tracks and all(now - t.get("time", 0) > 600 for t in tracks.values())
+        if not tracks or all(now - t.get("time", 0) > 600 for t in tracks.values())
     ]
     for tid in expired:
         del active_tasks[tid]
@@ -322,8 +322,11 @@ async def serve_or_upload_r2(local_path: str, background_tasks: BackgroundTasks,
     background_tasks.add_task(cleanup_file, local_path)
     if cleanup_paths:
         for cp in cleanup_paths:
-            if os.path.exists(cp) and not os.path.isdir(cp):
-                background_tasks.add_task(cleanup_file, cp)
+            if os.path.exists(cp):
+                if os.path.isdir(cp):
+                    background_tasks.add_task(cleanup_dir, cp)
+                else:
+                    background_tasks.add_task(cleanup_file, cp)
     background_tasks.add_task(cleanup_empty_dir, parent_dir)
 
     media_type = 'application/zip' if filename.endswith('.zip') else 'application/octet-stream'
@@ -336,7 +339,10 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
     require_auth()
     try:
         cb = create_progress_callback(task_id, track_id) if task_id else None
-        final_path = await downloader.download_track(track_id, progress_callback=cb)
+        final_path = await asyncio.wait_for(
+            downloader.download_track(track_id, progress_callback=cb),
+            timeout=300
+        )
         if not final_path or not os.path.exists(final_path):
             raise Exception("Download failed or skipped.")
             
@@ -371,7 +377,16 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         sem = asyncio.Semaphore(2)
         async def sem_download(tid, parent, cb):
             async with sem:
-                return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
+                try:
+                    return await asyncio.wait_for(
+                        downloader.download_track(tid, parent_folder=parent, progress_callback=cb),
+                        timeout=300
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Track {tid} download timed out after 300s")
+                    if cb:
+                        await cb(0, 1, "Timed out")
+                    return None
 
         tasks = []
         for item in items:
@@ -427,7 +442,16 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         sem = asyncio.Semaphore(2)
         async def sem_download(tid, parent, cb):
             async with sem:
-                return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
+                try:
+                    return await asyncio.wait_for(
+                        downloader.download_track(tid, parent_folder=parent, progress_callback=cb),
+                        timeout=300
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Track {tid} download timed out after 300s")
+                    if cb:
+                        await cb(0, 1, "Timed out")
+                    return None
 
         tasks = []
         for item in items:

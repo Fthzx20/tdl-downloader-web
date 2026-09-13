@@ -232,8 +232,22 @@ export default function Home() {
               (t: any) => t.downloaded >= t.total && t.total > 0
             ).length;
 
-            // Extract live download speed
             let liveSpeed = "";
+            let singleTrackStatus = "";
+            let calculatedPct = 0;
+
+            if (totalTracks === 1) {
+              const trk = trackList[0];
+              if (trk) {
+                if (trk.status) singleTrackStatus = trk.status;
+                if (trk.total > 0 && trk.downloaded > 0) {
+                  calculatedPct = Math.min(99, Math.round((trk.downloaded / trk.total) * 100));
+                }
+              }
+            } else if (totalTracks > 1) {
+              calculatedPct = Math.round((finished / totalTracks) * 100);
+            }
+
             for (const t of trackList) {
               if (t.status && (t.status.includes("MB/s") || t.status.includes("KB/s"))) {
                 const match = t.status.match(/\(([\d.]+\s*(?:MB|KB)\/s)\)/);
@@ -244,18 +258,15 @@ export default function Home() {
               }
             }
 
-            const pct = totalTracks > 0 ? Math.round((finished / totalTracks) * 100) : 0;
             const statusMsg =
               totalTracks > 1
                 ? `Downloading · ${finished}/${totalTracks} tracks`
-                : liveSpeed
-                  ? `Downloading from Tidal`
-                  : "Downloading from Tidal...";
+                : singleTrackStatus || (liveSpeed ? `Downloading from Tidal` : "Downloading from Tidal...");
 
             updateDownload(d.taskId, {
               statusText: statusMsg,
               speedText: liveSpeed,
-              progress: pct > 0 ? pct : d.progress,
+              progress: calculatedPct > 0 ? calculatedPct : d.progress,
             });
           }
         } catch {

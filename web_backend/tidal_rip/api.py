@@ -8,6 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 import urllib.parse
 import aiohttp
+from fastapi import HTTPException
 
 class TidalAPI:
     """Asynchronous client for interacting with the Tidal API."""
@@ -26,7 +27,7 @@ class TidalAPI:
         if self.session is None or self.session.closed:
             # Set a timeout so we don't hang indefinitely on stalled connections
             # total=None allows the download to take as long as it needs, as long as data is flowing
-            timeout = aiohttp.ClientTimeout(total=None, sock_read=30)
+            timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_connect=15, sock_read=30)
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
@@ -68,20 +69,27 @@ class TidalAPI:
                         await self.refresh_token()
                     except Exception as e:
                         print(f"Manual token refresh failed: {e}")
-                        # Don't crash immediately, let the 401 be handled below
+                        raise HTTPException(status_code=401, detail="Tidal session expired or invalid. Please log in again.")
                     
                     headers["Authorization"] = f"Bearer {self.config.access_token}"
                     async with session.request(method, url, headers=headers, params=request_params, json=json_data) as retry_resp:
+                        if retry_resp.status == 401:
+                            raise HTTPException(status_code=401, detail="Tidal session expired or invalid. Please log in again.")
                         if retry_resp.status >= 400:
                             err_text = await retry_resp.text()
                             raise Exception(f"API request failed with status {retry_resp.status}: {err_text}")
                         return await retry_resp.json()
                 
+                if resp.status == 401:
+                    raise HTTPException(status_code=401, detail="Tidal session expired or invalid. Please log in again.")
+
                 if resp.status >= 400:
                     err_text = await resp.text()
                     raise Exception(f"API request failed with status {resp.status}: {err_text}")
                 
                 return await resp.json()
+        except HTTPException:
+            raise
         except Exception as e:
             raise Exception(f"Network error requesting {url}: {e}")
 
