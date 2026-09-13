@@ -303,19 +303,22 @@ class TidalAPI:
 
     async def get_stream_info(self, track_id, quality):
         """Fetches and decodes the stream manifest for a track at target quality with quality fallback."""
+        target_quality = "HI_RES_LOSSLESS" if quality == "MAX" else quality
         params = {
             "playbackmode": "STREAM",
             "assetpresentation": "FULL",
-            "audioquality": quality
+            "audioquality": target_quality
         }
         
         try:
             resp = await self._api_request("GET", f"tracks/{track_id}/playbackinfopostpaywall", params=params)
         except Exception as e:
             fallback_map = {
-                "HI_RES_LOSSLESS": ["HI_RES", "LOSSLESS", "HIGH"],
-                "HI_RES": ["LOSSLESS", "HIGH"],
-                "LOSSLESS": ["HIGH"],
+                "MAX": ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH", "LOW"],
+                "HI_RES_LOSSLESS": ["HI_RES", "LOSSLESS", "HIGH", "LOW"],
+                "HI_RES": ["LOSSLESS", "HIGH", "LOW"],
+                "LOSSLESS": ["HIGH", "LOW"],
+                "HIGH": ["LOW"]
             }
             if quality in fallback_map:
                 for alt_q in fallback_map[quality]:

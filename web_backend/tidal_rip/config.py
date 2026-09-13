@@ -55,12 +55,22 @@ class Config:
 
     def load(self):
         """Loads config from file if it exists, otherwise creates defaults."""
-        if not os.path.exists(self.config_path):
+        target_path = self.config_path
+        backup_path = os.path.join(os.getcwd(), "config.json")
+        
+        if not os.path.exists(target_path) and os.path.exists(backup_path):
+            target_path = backup_path
+            
+        if not os.path.exists(target_path):
+            # Check env fallback for tokens
+            self.access_token = os.environ.get("TIDAL_ACCESS_TOKEN", self.access_token)
+            self.refresh_token = os.environ.get("TIDAL_REFRESH_TOKEN", self.refresh_token)
+            self.user_id = os.environ.get("TIDAL_USER_ID", self.user_id)
             self.save()
             return
             
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 
             loaded_client_id = data.get("client_id", self.DEFAULT_CLIENT_ID)
@@ -76,10 +86,10 @@ class Config:
             else:
                 self.client_id = loaded_client_id
                 self.client_secret = data.get("client_secret", self.DEFAULT_CLIENT_SECRET)
-            self.access_token = data.get("access_token", "")
-            self.refresh_token = data.get("refresh_token", "")
+            self.access_token = data.get("access_token") or os.environ.get("TIDAL_ACCESS_TOKEN", "")
+            self.refresh_token = data.get("refresh_token") or os.environ.get("TIDAL_REFRESH_TOKEN", "")
             self.token_expiry = float(data.get("token_expiry", 0.0))
-            self.user_id = data.get("user_id", "")
+            self.user_id = data.get("user_id") or os.environ.get("TIDAL_USER_ID", "")
             self.user_name = data.get("user_name", "")
             self.download_directory = data.get("download_directory", os.path.expanduser("~/Music/Tidal Downloads"))
             self.quality_tier = data.get("quality_tier", "LOSSLESS")
@@ -127,6 +137,13 @@ class Config:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"Error saving configuration: {e}")
+            
+        try:
+            backup_path = os.path.join(os.getcwd(), "config.json")
+            with open(backup_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
 
     def clear_session(self):
         """Clears all session-related tokens and user credentials."""
