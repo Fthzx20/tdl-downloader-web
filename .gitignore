@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+web_frontend/node_modules/
+
+# Next.js Build Output
+web_frontend/.next/
+web_frontend/out/
+web_frontend/build/
+
+# Python Cache & Environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+web_backend/__pycache__/
+web_backend/tidal_rip/__pycache__/
+
+# Local Temp & Scratch Folders
+scratch/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# System & Log Files
+.DS_Store
+Thumbs.db
+*.log
+*.zip
