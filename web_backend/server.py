@@ -374,7 +374,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         if not items:
             raise Exception("No tracks found on this album.")
             
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(3)
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
@@ -408,9 +408,14 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
             
         album_dir = os.path.dirname(valid_paths[0])
         
+        # Update progress to indicate zipping stage
+        if task_id and task_id in active_tasks:
+            for tid_key in active_tasks[task_id]:
+                active_tasks[task_id][tid_key]["status"] = "Creating ZIP archive..."
+
         uid_tag = task_id if task_id else str(int(time.time() * 1000))
         zip_path = os.path.join(TEMP_DIR, f"{safe_album}_{uid_tag}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
             for root_dir, dirs, files in os.walk(album_dir):
                 for file in files:
                     file_path = os.path.join(root_dir, file)
@@ -439,7 +444,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         if not items:
             raise Exception("No tracks found in this playlist.")
             
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(3)
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
@@ -473,9 +478,14 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
             
         playlist_dir = os.path.dirname(valid_paths[0])
         
+        # Update progress to indicate zipping stage
+        if task_id and task_id in active_tasks:
+            for tid_key in active_tasks[task_id]:
+                active_tasks[task_id][tid_key]["status"] = "Creating ZIP archive..."
+
         uid_tag = task_id if task_id else str(int(time.time() * 1000))
         zip_path = os.path.join(TEMP_DIR, f"{safe_playlist}_{uid_tag}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
             for root_dir, dirs, files in os.walk(playlist_dir):
                 for file in files:
                     file_path = os.path.join(root_dir, file)
