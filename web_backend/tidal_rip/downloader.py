@@ -100,7 +100,7 @@ class DownloadManager:
                 elif lyrics_data.get("lyrics"):
                     lyrics_text = lyrics_data["lyrics"]
                 if lyrics_text:
-                    with open(lrc_path, "w", encoding="utf-8") as f:
+                    with open(lrc_path, "w", encoding="utf-8-sig") as f:
                         f.write(lyrics_text)
         except Exception as e:
             print(f"Failed to fetch lyrics for {track_id}: {e}")
@@ -381,6 +381,7 @@ class DownloadManager:
                         print(f"Failed to attach cover to FLAC: {e}")
                     
                 if tags.get("lyrics"):
+                    audio["LYRICS"] = tags["lyrics"]
                     audio["UNSYNCEDLYRICS"] = tags["lyrics"]
                     
                 audio.save()

@@ -229,8 +229,18 @@ class TidalAPI:
         return await self._api_request("GET", f"albums/{album_id}")
 
     async def get_album_tracks(self, album_id):
-        """Gets all tracks on an album."""
-        return await self._api_request("GET", f"albums/{album_id}/tracks")
+        """Gets all tracks on an album with automatic pagination."""
+        tracks = []
+        limit = 100
+        offset = 0
+        while True:
+            resp = await self._api_request("GET", f"albums/{album_id}/tracks", params={"limit": limit, "offset": offset})
+            items = resp.get("items", [])
+            tracks.extend(items)
+            if len(items) < limit:
+                break
+            offset += limit
+        return {"items": tracks}
 
     async def get_playlist(self, playlist_id):
         """Gets metadata for a specific playlist."""
@@ -273,14 +283,29 @@ class TidalAPI:
     # --- Stream manifest parser ---
 
     async def get_stream_info(self, track_id, quality):
-        """Fetches and decodes the stream manifest for a track at target quality."""
+        """Fetches and decodes the stream manifest for a track at target quality with quality fallback."""
         params = {
             "playbackmode": "STREAM",
             "assetpresentation": "FULL",
             "audioquality": quality
         }
         
-        resp = await self._api_request("GET", f"tracks/{track_id}/playbackinfopostpaywall", params=params)
+        try:
+            resp = await self._api_request("GET", f"tracks/{track_id}/playbackinfopostpaywall", params=params)
+        except Exception as e:
+            fallback_map = {
+                "HI_RES_LOSSLESS": ["HI_RES", "LOSSLESS", "HIGH"],
+                "HI_RES": ["LOSSLESS", "HIGH"],
+                "LOSSLESS": ["HIGH"],
+            }
+            if quality in fallback_map:
+                for alt_q in fallback_map[quality]:
+                    try:
+                        print(f"Track {track_id} failed at {quality}. Retrying fallback quality {alt_q}...")
+                        return await self.get_stream_info(track_id, alt_q)
+                    except Exception:
+                        continue
+            raise Exception(f"Track {track_id} is unavailable or region-restricted on Tidal ({e})")
         
         mime_type = resp.get("manifestMimeType")
         encoded_manifest = resp.get("manifest")

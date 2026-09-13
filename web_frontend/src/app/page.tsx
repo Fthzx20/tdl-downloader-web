@@ -551,8 +551,8 @@ export default function Home() {
     setSelectedCollection(null);
     toast.info(`Queued ${tracksToDownload.length} tracks for download`);
     for (const track of tracksToDownload) {
-      handleDownload(track, "track");
-      await new Promise((r) => setTimeout(r, 400));
+      await handleDownload(track, "track");
+      await new Promise((r) => setTimeout(r, 200));
     }
   };
 
