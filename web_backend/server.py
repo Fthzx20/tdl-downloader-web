@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from tidal_rip.config import Config
 from tidal_rip.api import TidalAPI
-from tidal_rip.downloader import DownloadManager
+from tidal_rip.downloader import DownloadManager, sanitize_filename
 
 app = FastAPI(title="Tidal Rip Web API")
 
@@ -262,13 +262,14 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.get("/download/album/{album_id}")
 async def download_album(album_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads an album, zips it, and returns the zip file."""
     require_auth()
     try:
         album = await api.get_album(album_id)
-        safe_album = album.get("title", "Album").replace("/", "_").replace("\\", "_")
+        safe_album = sanitize_filename(album.get("title", "Album"))
         
         tracks_resp = await api.get_album_tracks(album_id)
         items = tracks_resp.get("items", [])
@@ -276,11 +277,16 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         if not items:
             raise Exception("No tracks found on this album.")
             
+        sem = asyncio.Semaphore(3)
+        async def sem_download(tid, parent, cb):
+            async with sem:
+                return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
+
         tasks = []
         for item in items:
             tid = item["id"]
             cb = create_progress_callback(task_id, str(tid)) if task_id else None
-            tasks.append(downloader.download_track(tid, parent_folder=safe_album, progress_callback=cb))
+            tasks.append(sem_download(tid, safe_album, cb))
             
         downloaded_paths = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -302,6 +308,8 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         background_tasks.add_task(cleanup_file, zip_path)
         
         return FileResponse(zip_path, media_type='application/zip', filename=f"{safe_album}.zip")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -312,19 +320,24 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
     require_auth()
     try:
         playlist = await api.get_playlist(playlist_id)
-        safe_playlist = playlist.get("title", "Playlist").replace("/", "_").replace("\\", "_")
+        safe_playlist = sanitize_filename(playlist.get("title", "Playlist"))
         
         items = await api.get_playlist_tracks(playlist_id)
         if not items:
             raise Exception("No tracks found in this playlist.")
             
+        sem = asyncio.Semaphore(3)
+        async def sem_download(tid, parent, cb):
+            async with sem:
+                return await downloader.download_track(tid, parent_folder=parent, progress_callback=cb)
+
         tasks = []
         for item in items:
             track_info = item.get("item") if "item" in item else item
             if track_info and "id" in track_info:
                 tid = track_info["id"]
                 cb = create_progress_callback(task_id, str(tid)) if task_id else None
-                tasks.append(downloader.download_track(tid, parent_folder=safe_playlist, progress_callback=cb))
+                tasks.append(sem_download(tid, safe_playlist, cb))
                 
         downloaded_paths = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -346,6 +359,8 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         background_tasks.add_task(cleanup_file, zip_path)
         
         return FileResponse(zip_path, media_type='application/zip', filename=f"{safe_playlist}.zip")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
