@@ -84,8 +84,41 @@ def cleanup_dir(path: str):
         print(f"Failed to cleanup {path}: {e}")
 
 
+def purge_stale_temp_cache(max_age_seconds: int = 900):
+    """Purges lingering temporary files (.tmp, .zip archives, empty directories) older than max_age_seconds."""
+    try:
+        now = time.time()
+        # Clean TEMP_DIR (zip archives)
+        if os.path.exists(TEMP_DIR):
+            for fname in os.listdir(TEMP_DIR):
+                fpath = os.path.join(TEMP_DIR, fname)
+                try:
+                    if os.path.isfile(fpath) and (now - os.path.getmtime(fpath) > max_age_seconds):
+                        os.remove(fpath)
+                    elif os.path.isdir(fpath) and (now - os.path.getmtime(fpath) > max_age_seconds):
+                        shutil.rmtree(fpath)
+                except Exception:
+                    pass
+        # Clean lingering .tmp files in download directory
+        dl_dir = config.download_directory
+        if os.path.exists(dl_dir):
+            for root_dir, dirs, files in os.walk(dl_dir):
+                for file in files:
+                    if file.endswith(".tmp"):
+                        fpath = os.path.join(root_dir, file)
+                        try:
+                            if now - os.path.getmtime(fpath) > max_age_seconds:
+                                os.remove(fpath)
+                        except Exception:
+                            pass
+    except Exception as e:
+        print(f"Error purging stale cache: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
+    # Purge any old leftover temp files on startup
+    purge_stale_temp_cache(max_age_seconds=300)
     # If token exists, verify session
     if config.access_token:
         try:
@@ -93,6 +126,13 @@ async def startup_event():
             print("Session verified on startup.")
         except Exception:
             pass
+
+
+@app.post("/system/clear_cache")
+def clear_cache_endpoint():
+    """Manually purges temporary files, zip archives, and cached temp files."""
+    purge_stale_temp_cache(max_age_seconds=0) # Clear all immediately
+    return {"status": "success", "message": "Server temporary cache cleared."}
 
 
 @app.get("/")

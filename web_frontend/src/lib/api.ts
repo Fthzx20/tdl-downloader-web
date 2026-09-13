@@ -87,3 +87,9 @@ export async function getPlaylistTracks(playlistId: string) {
   return res.json();
 }
 
+export async function clearServerCache() {
+  const res = await fetch(`${API_BASE}/system/clear_cache`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to clear server cache");
+  return res.json();
+}
+

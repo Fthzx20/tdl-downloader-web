@@ -25,6 +25,7 @@ import {
   List,
   CheckSquare,
   Square,
+  Sparkles,
 } from "lucide-react";
 import {
   getAuthStatus,
@@ -38,6 +39,7 @@ import {
   getProgress,
   getAlbumTracks,
   getPlaylistTracks,
+  clearServerCache,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
@@ -66,6 +68,7 @@ type ActiveDownload = {
   isError: boolean;
   item?: any;
   itemType?: string;
+  abortController?: AbortController;
 };
 
 /* ─── Helper: Get cover image URL from Tidal data ─── */
@@ -364,6 +367,8 @@ export default function Home() {
     const url = `${getDownloadUrl(downloadType, itemId)}?task_id=${taskId}`;
     const itemTitle = item.title || item.name;
 
+    const controller = new AbortController();
+
     setShowDownloads(true);
     setActiveDownloads((prev) => [
       ...prev,
@@ -376,11 +381,12 @@ export default function Home() {
         isError: false,
         item,
         itemType: downloadType,
+        abortController: controller,
       },
     ]);
 
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) {
         let errDetail = "Download failed";
         try {
@@ -445,6 +451,16 @@ export default function Home() {
       });
       toast.success(`Downloaded "${itemTitle}"`);
     } catch (err: any) {
+      if (err?.name === "AbortError") {
+        updateDownload(taskId, {
+          statusText: "Cancelled",
+          isError: true,
+          isComplete: true,
+          progress: 0,
+        });
+        toast.info(`Cancelled download for "${itemTitle}"`);
+        return;
+      }
       const msg = err?.message || `Failed to download "${itemTitle}"`;
       updateDownload(taskId, {
         statusText: "Failed",
@@ -452,6 +468,32 @@ export default function Home() {
         isComplete: true,
       });
       toast.error(msg);
+    }
+  };
+
+  const handleCancelDownload = (taskId: string) => {
+    const target = activeDownloads.find((d) => d.taskId === taskId);
+    if (target && target.abortController) {
+      try {
+        target.abortController.abort();
+      } catch {}
+    } else {
+      updateDownload(taskId, {
+        statusText: "Cancelled",
+        isError: true,
+        isComplete: true,
+        progress: 0,
+      });
+      toast.info("Download cancelled");
+    }
+  };
+
+  const handleClearServerCache = async () => {
+    try {
+      await clearServerCache();
+      toast.success("Server cache cleared successfully");
+    } catch {
+      toast.error("Failed to clear server cache");
     }
   };
 
@@ -981,6 +1023,15 @@ export default function Home() {
               )}
             </div>
             <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="w-7 h-7 rounded-full hover:bg-white/10 text-muted-foreground hover:text-primary"
+                onClick={handleClearServerCache}
+                title="Clear server cache"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+              </Button>
               {activeDownloads.some((d) => d.isComplete) && (
                 <Button
                   variant="ghost"
@@ -1045,6 +1096,17 @@ export default function Home() {
                           {d.statusText}
                         </span>
                       </div>
+                      {!d.isComplete && !d.isError && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="w-7 h-7 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 shrink-0"
+                          onClick={() => handleCancelDownload(d.taskId)}
+                          title="Cancel download"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
                       {d.isError && d.item && (
                         <Button
                           variant="ghost"
