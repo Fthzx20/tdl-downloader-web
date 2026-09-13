@@ -19,6 +19,7 @@ class TidalAPI:
         self.config = config
         self.session = None
         self.country_code = "US"  # Default fallback
+        self._refresh_lock = asyncio.Lock()
 
     async def get_session(self):
         """Lazy-loaded aiohttp client session."""
@@ -140,39 +141,47 @@ class TidalAPI:
 
     async def refresh_token(self):
         """Refreshes the Access Token using the stored Refresh Token."""
-        if not self.config.refresh_token:
-            self.config.clear_session()
-            raise Exception("No refresh token available. Please log in again.")
+        if not hasattr(self, "_refresh_lock") or self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
 
-        session = await self.get_session()
-        url = f"{self.AUTH_URL}/token"
-
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        data = {
-            "client_id": self.config.pkce_client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": self.config.refresh_token,
-        }
-
-        async with session.post(url, data=data, headers=headers) as resp:
-            try:
-                resp_json = await resp.json(content_type=None)
-            except Exception:
-                err_text = await resp.text()
-                raise Exception(f"Unexpected response refreshing token ({resp.status}): {err_text[:200]}")
-            if resp.status == 200:
-                self.config.access_token = resp_json["access_token"]
-                self.config.refresh_token = resp_json.get("refresh_token", self.config.refresh_token)
-                self.config.token_expiry = time.time() + float(resp_json.get("expires_in", 604800))
-                self.config.save()
-                await self.fetch_session_info()
+        async with self._refresh_lock:
+            # If another concurrent task refreshed the token while we were waiting for the lock, skip!
+            if self.config.access_token and (self.config.token_expiry - time.time() > 300):
                 return True
-            else:
-                err_code = resp_json.get("error", "")
-                if resp.status in (400, 401) and err_code in ("invalid_grant", "unauthorized_client", "invalid_request"):
-                    self.config.clear_session()
-                err_desc = resp_json.get("error_description") or resp_json.get("userMessage") or str(resp_json)
-                raise Exception(f"Failed to refresh token ({resp.status}): {err_desc}")
+
+            if not self.config.refresh_token:
+                self.config.clear_session()
+                raise Exception("No refresh token available. Please log in again.")
+
+            session = await self.get_session()
+            url = f"{self.AUTH_URL}/token"
+
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            data = {
+                "client_id": self.config.pkce_client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": self.config.refresh_token,
+            }
+
+            async with session.post(url, data=data, headers=headers) as resp:
+                try:
+                    resp_json = await resp.json(content_type=None)
+                except Exception:
+                    err_text = await resp.text()
+                    raise Exception(f"Unexpected response refreshing token ({resp.status}): {err_text[:200]}")
+                if resp.status == 200:
+                    self.config.access_token = resp_json["access_token"]
+                    self.config.refresh_token = resp_json.get("refresh_token", self.config.refresh_token)
+                    self.config.token_expiry = time.time() + float(resp_json.get("expires_in", 604800))
+                    self.config.save()
+                    await self.fetch_session_info()
+                    return True
+                else:
+                    err_code = resp_json.get("error", "")
+                    if resp.status in (400, 401) and err_code in ("invalid_grant", "unauthorized_client", "invalid_request"):
+                        self.config.clear_session()
+                    err_desc = resp_json.get("error_description") or resp_json.get("userMessage") or str(resp_json)
+                    raise Exception(f"Failed to refresh token ({resp.status}): {err_desc}")
 
     def _decode_token_payload(self):
         """Decodes the JWT access token payload without verification."""
