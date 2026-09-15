@@ -263,6 +263,18 @@ async def search(query: str, type: str = "tracks"):
 
 
 active_tasks = {}
+completed_tasks = {}  # task_id -> completion timestamp
+
+def mark_task_complete(task_id: str):
+    """Mark a task as complete so the frontend polling can detect it."""
+    if task_id:
+        completed_tasks[task_id] = time.time()
+        # Clean up old completed tasks (older than 2 minutes) to prevent memory leak
+        now = time.time()
+        stale = [tid for tid, ts in completed_tasks.items() if now - ts > 120]
+        for tid in stale:
+            completed_tasks.pop(tid, None)
+            active_tasks.pop(tid, None)
 
 def create_progress_callback(task_id: str, track_id: str):
     async def cb(downloaded, total, status):
@@ -287,6 +299,11 @@ def get_progress(task_id: str):
     ]
     for tid in expired:
         del active_tasks[tid]
+
+    # Check if task was explicitly marked as complete
+    if task_id in completed_tasks:
+        tracks_data = active_tasks.get(task_id, {})
+        return {"status": "complete", "tracks": tracks_data}
 
     if task_id not in active_tasks:
         return {"status": "not_found", "tracks": {}}
@@ -356,6 +373,7 @@ async def download_track(track_id: str, background_tasks: BackgroundTasks, task_
         lrc_path = os.path.splitext(final_path)[0] + ".lrc"
         cleanup_paths = [lrc_path] if os.path.exists(lrc_path) else []
         
+        mark_task_complete(task_id)
         return await serve_or_upload_r2(final_path, background_tasks, cleanup_paths=cleanup_paths)
     except HTTPException:
         raise
@@ -429,6 +447,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
                     arcname = os.path.relpath(file_path, album_dir)
                     zipf.write(file_path, arcname)
                     
+        mark_task_complete(task_id)
         return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[album_dir])
     except HTTPException:
         raise
@@ -499,6 +518,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
                     arcname = os.path.relpath(file_path, playlist_dir)
                     zipf.write(file_path, arcname)
                     
+        mark_task_complete(task_id)
         return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[playlist_dir])
     except HTTPException:
         raise

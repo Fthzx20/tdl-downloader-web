@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Search as SearchIcon,
   Download,
@@ -26,6 +26,7 @@ import {
   CheckSquare,
   Square,
   Sparkles,
+  Globe,
 } from "lucide-react";
 import {
   getAuthStatus,
@@ -69,6 +70,7 @@ type ActiveDownload = {
   item?: any;
   itemType?: string;
   abortController?: AbortController;
+  createdAt: number;
 };
 
 /* ─── Helper: Get cover image URL from Tidal data ─── */
@@ -156,6 +158,9 @@ export default function Home() {
   const [showDownloads, setShowDownloads] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
 
+  // Tracks which task_ids have been seen as "active" at least once (for completion detection)
+  const taskSeenActive = useRef<Set<string>>(new Set());
+
   // Track Selector Modal State
   const [selectedCollection, setSelectedCollection] = useState<{ type: "albums" | "playlists"; item: any } | null>(null);
   const [collectionTracks, setCollectionTracks] = useState<any[]>([]);
@@ -217,7 +222,7 @@ export default function Home() {
   // Polling for server-side progress & live download speed
   useEffect(() => {
     const incomplete = activeDownloads.filter(
-      (d) => !d.isComplete && !d.isError && d.progress < 100
+      (d) => !d.isComplete && !d.isError
     );
     if (incomplete.length === 0) return;
 
@@ -225,7 +230,20 @@ export default function Home() {
       incomplete.forEach(async (d) => {
         try {
           const res = await getProgress(d.taskId);
+
+          if (res.status === "complete") {
+            // Backend explicitly marked this task as complete
+            updateDownload(d.taskId, {
+              statusText: "Downloaded ✓",
+              progress: 100,
+              isComplete: true,
+            });
+            taskSeenActive.current.delete(d.taskId);
+            return;
+          }
+
           if (res.status === "active" && res.tracks) {
+            taskSeenActive.current.add(d.taskId);
             const trackList = Object.values(res.tracks) as any[];
             const totalTracks = trackList.length;
             const finished = trackList.filter(
@@ -250,7 +268,7 @@ export default function Home() {
 
             for (const t of trackList) {
               if (t.status && (t.status.includes("MB/s") || t.status.includes("KB/s"))) {
-                const match = t.status.match(/\(([\d.]+\s*(?:MB|KB)\/s)\)/);
+                const match = t.status.match(/([\d.]+\s*(?:MB|KB)\/s)/);
                 if (match) {
                   liveSpeed = match[1];
                   break;
@@ -269,12 +287,57 @@ export default function Home() {
               progress: calculatedPct > 0 ? calculatedPct : d.progress,
             });
           }
+
+          if (res.status === "not_found" && taskSeenActive.current.has(d.taskId)) {
+            // Task was previously active but now gone — backend cleaned up = complete
+            updateDownload(d.taskId, {
+              statusText: "Downloaded ✓",
+              progress: 100,
+              isComplete: true,
+            });
+            taskSeenActive.current.delete(d.taskId);
+            return;
+          }
+
+          // Timeout fallback: if after 10s the entry still shows "Preparing..." with 0 progress,
+          // it likely completed too fast for polling to catch
+          if (
+            res.status === "not_found" &&
+            !taskSeenActive.current.has(d.taskId) &&
+            Date.now() - d.createdAt > 10000
+          ) {
+            updateDownload(d.taskId, {
+              statusText: "Downloaded ✓",
+              progress: 100,
+              isComplete: true,
+            });
+            return;
+          }
         } catch {
           // Silently ignore polling errors
         }
       });
-    }, 1000);
+    }, 1500);
     return () => clearInterval(interval);
+  }, [activeDownloads]);
+
+  // Auto-clear completed downloads after 5 seconds
+  useEffect(() => {
+    const completed = activeDownloads.filter((d) => d.isComplete && !d.isError);
+    const hasErrors = activeDownloads.some((d) => d.isError);
+    if (completed.length === 0) return;
+
+    // Only auto-clear if there are no in-progress downloads left
+    const inProgress = activeDownloads.filter((d) => !d.isComplete && !d.isError);
+    if (inProgress.length > 0) return;
+
+    const timer = setTimeout(() => {
+      setActiveDownloads((prev) => prev.filter((d) => d.isError));
+      if (!hasErrors) {
+        setShowDownloads(false);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
   }, [activeDownloads]);
 
   /* ─── State Helpers ─── */
@@ -397,6 +460,7 @@ export default function Home() {
         isError: false,
         item,
         itemType: downloadType,
+        createdAt: Date.now(),
       },
     ]);
 
@@ -708,9 +772,12 @@ export default function Home() {
                   <p className="text-xs font-semibold truncate text-foreground">
                     {userInfo.username || "Tidal Account"}
                   </p>
-                  <p className="text-[10px] text-muted-foreground/60 truncate">
-                    {userInfo.user_id ? `ID: ${userInfo.user_id}` : "Connected"}
-                  </p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/20 text-[9px] font-semibold text-emerald-400 uppercase tracking-wider">
+                      <Globe className="w-2.5 h-2.5" />
+                      Shared
+                    </span>
+                  </div>
                 </div>
               </div>
               <Button
@@ -1203,6 +1270,12 @@ function SettingsDialog({
                   Logout
                 </button>
               )}
+            </div>
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/[0.07] border border-emerald-500/15">
+              <Globe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <p className="text-[11px] text-emerald-400/80 leading-snug">
+                Shared session — this Tidal account is accessible across all devices connected to the server.
+              </p>
             </div>
           </div>
         )}
