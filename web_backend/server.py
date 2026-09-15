@@ -5,6 +5,8 @@ import asyncio
 import zipfile
 import time
 import gc
+import urllib.parse
+import aiohttp
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -67,6 +69,97 @@ def parse_tidal_url(query: str):
         if match:
             return item_type, match.group(1)
     return None, None
+
+
+async def resolve_external_link(url: str):
+    """Resolves Spotify, Deezer, Apple Music, or YouTube Music URLs to a search query tuple (type, search_query, platform_name)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    url_clean = url.split("?")[0].split("#")[0].strip()
+    
+    # 1. Deezer
+    if "deezer.com" in url_clean or "deezer.page.link" in url_clean:
+        track_match = re.search(r"deezer\.com/(?:[a-z]+/)?track/(\d+)", url_clean)
+        album_match = re.search(r"deezer\.com/(?:[a-z]+/)?album/(\d+)", url_clean)
+        async with aiohttp.ClientSession(headers=headers) as session:
+            try:
+                if track_match:
+                    tid = track_match.group(1)
+                    async with session.get(f"https://api.deezer.com/track/{tid}") as resp:
+                        if resp.status == 200:
+                            d = await resp.json()
+                            title = d.get("title", "")
+                            artist = d.get("artist", {}).get("name", "")
+                            isrc = d.get("isrc", "")
+                            query = isrc if isrc else f"{title} {artist}".strip()
+                            return "track", query, "Deezer"
+                elif album_match:
+                    aid = album_match.group(1)
+                    async with session.get(f"https://api.deezer.com/album/{aid}") as resp:
+                        if resp.status == 200:
+                            d = await resp.json()
+                            title = d.get("title", "")
+                            artist = d.get("artist", {}).get("name", "")
+                            return "album", f"{title} {artist}".strip(), "Deezer"
+            except Exception as e:
+                print(f"Deezer resolve error: {e}")
+
+    # 2. Spotify
+    elif "spotify.com" in url_clean or "spoti.fi" in url_clean:
+        is_album = "/album/" in url_clean
+        embed_url = url_clean.replace("open.spotify.com/", "open.spotify.com/embed/")
+        async with aiohttp.ClientSession(headers=headers) as session:
+            try:
+                async with session.get(embed_url) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', text)
+                        if match:
+                            import json
+                            data = json.loads(match.group(1))
+                            entity = data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
+                            name = entity.get("name", "")
+                            artists = [a.get("name") for a in entity.get("artists", []) if a.get("name")]
+                            artist_str = " ".join(artists)
+                            item_type = "album" if is_album else "track"
+                            return item_type, f"{name} {artist_str}".strip(), "Spotify"
+            except Exception as e:
+                print(f"Spotify embed parse error: {e}")
+
+    # 3. YouTube / YouTube Music
+    elif "youtube.com" in url_clean or "youtu.be" in url_clean:
+        encoded = urllib.parse.quote(url, safe="")
+        ep = f"https://www.youtube.com/oembed?url={encoded}&format=json"
+        async with aiohttp.ClientSession(headers=headers) as session:
+            try:
+                async with session.get(ep) as resp:
+                    if resp.status == 200:
+                        d = await resp.json()
+                        title = d.get("title", "")
+                        author = d.get("author_name", "")
+                        clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()
+                        clean_title = re.sub(r"(?i)\b(official video|lyric video|audio|remastered|hd|4k)\b", "", clean_title).strip()
+                        if author and author.lower() not in clean_title.lower():
+                            query_str = f"{clean_title} {author}".strip()
+                        else:
+                            query_str = clean_title
+                        return "track", query_str, "YouTube Music"
+            except Exception as e:
+                print(f"YouTube oEmbed error: {e}")
+
+    # 4. Apple Music
+    elif "apple.com" in url_clean:
+        is_album = "/album/" in url_clean and "?i=" not in url
+        slug_match = re.search(r"apple\.com/(?:[a-z]+/)?album/(?:[^/]+/)?([^/?#]+)", url_clean)
+        if slug_match:
+            slug = slug_match.group(1).replace("-", " ")
+            slug = re.sub(r"\d+$", "", slug).strip()  # Strip trailing track/album numeric IDs if matched
+            item_type = "album" if is_album else "track"
+            return item_type, slug, "Apple Music"
+
+    return None, None, None
 
 
 def cleanup_file(path: str):
@@ -234,11 +327,16 @@ async def search(query: str, type: str = "tracks"):
                 albums_resp = await api.get_artist_albums(url_id)
                 return {"items": albums_resp.get("items", []), "resolved_type": "albums"}
 
-        # Standard keyword search query
-        res = await api.search(query_str, limit=50)
+        # Check for cross-platform links (Spotify, Deezer, Apple Music, YouTube Music)
+        ext_type, ext_query, platform_name = await resolve_external_link(query_str)
+        effective_query = ext_query if ext_query else query_str
+        target_type = (ext_type + "s") if ext_type else type
+
+        # Standard keyword search query using effective query
+        res = await api.search(effective_query, limit=50)
         
         # Extract category data
-        category_data = res.get(type, {}) if isinstance(res.get(type), dict) else {}
+        category_data = res.get(target_type, {}) if isinstance(res.get(target_type), dict) else {}
         items = list(category_data.get("items", []))
         
         # Check topHit for exact match prioritization
@@ -247,14 +345,20 @@ async def search(query: str, type: str = "tracks"):
             top_hit_item = top_hit.get("value")
             top_hit_type = str(top_hit.get("type", "")).lower()
             
-            # Match topHit type with request type (singular vs plural e.g. track vs tracks)
-            if top_hit_item and isinstance(top_hit_item, dict) and (top_hit_type == type or top_hit_type == type.rstrip("s")):
+            # Match topHit type with request type
+            if top_hit_item and isinstance(top_hit_item, dict) and (top_hit_type == target_type or top_hit_type == target_type.rstrip("s")):
                 top_hit_id = top_hit_item.get("id")
                 if top_hit_id is not None:
                     items = [item for item in items if item.get("id") != top_hit_id]
                     items.insert(0, top_hit_item)
             
-        return {"items": items}
+        response_payload = {"items": items}
+        if ext_query:
+            response_payload["resolved_type"] = target_type
+            response_payload["converted_from"] = platform_name
+            response_payload["original_query"] = query_str
+            
+        return response_payload
     except HTTPException:
         raise
     except Exception as e:
@@ -291,8 +395,14 @@ def create_progress_callback(task_id: str, track_id: str):
 
 @app.get("/progress/{task_id}")
 def get_progress(task_id: str):
-    # Clean up old tasks inactive for > 10 minutes (600s) or empty tasks to prevent memory leak
     now = time.time()
+    # Prune stale completed_tasks older than 2 minutes
+    stale_completed = [tid for tid, ts in list(completed_tasks.items()) if now - ts > 120]
+    for tid in stale_completed:
+        completed_tasks.pop(tid, None)
+        active_tasks.pop(tid, None)
+
+    # Clean up old tasks inactive for > 10 minutes (600s) or empty tasks to prevent memory leak
     expired = [
         tid for tid, tracks in list(active_tasks.items())
         if not tracks or all(now - t.get("time", 0) > 600 for t in tracks.values())
@@ -548,6 +658,70 @@ async def get_playlist_tracks_endpoint(playlist_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/preview/{track_id}")
+async def get_preview_endpoint(track_id: str):
+    """Gets audio stream preview URL for 30s playback."""
+    require_auth()
+    try:
+        info = await api.get_stream_info(track_id, "LOW")
+        url = info.get("url")
+        if not url:
+            raise Exception("No preview stream URL available.")
+        return {"status": "success", "preview_url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class BatchResolveRequest(BaseModel):
+    urls: list[str]
+
+@app.post("/batch/resolve")
+async def batch_resolve_endpoint(req: BatchResolveRequest):
+    """Resolves multiple URLs (Tidal or cross-platform links) to items for batch download."""
+    require_auth()
+    resolved_items = []
+    
+    for raw_url in req.urls:
+        u = raw_url.strip()
+        if not u:
+            continue
+            
+        url_type, url_id = parse_tidal_url(u)
+        if url_type:
+            try:
+                if url_type == "track":
+                    item = await api.get_track(url_id)
+                    resolved_items.append({"type": "track", "item": item, "original_url": u})
+                elif url_type == "album":
+                    item = await api.get_album(url_id)
+                    resolved_items.append({"type": "album", "item": item, "original_url": u})
+                elif url_type == "playlist":
+                    item = await api.get_playlist(url_id)
+                    resolved_items.append({"type": "playlist", "item": item, "original_url": u})
+            except Exception as e:
+                print(f"Error resolving Tidal link {u}: {e}")
+            continue
+
+        ext_type, ext_query, platform_name = await resolve_external_link(u)
+        if ext_query:
+            try:
+                target_type = (ext_type + "s") if ext_type else "tracks"
+                res = await api.search(ext_query, limit=1)
+                cat = res.get(target_type, {}) if isinstance(res.get(target_type), dict) else {}
+                items = cat.get("items", [])
+                if items:
+                    resolved_items.append({
+                        "type": ext_type or "track",
+                        "item": items[0],
+                        "converted_from": platform_name,
+                        "original_url": u
+                    })
+            except Exception as e:
+                print(f"Error resolving external link {u}: {e}")
+                
+    return {"resolved": resolved_items}
+
+
 class SettingsRequest(BaseModel):
     quality_tier: str | None = None
     allow_dolby_atmos: bool | None = None
@@ -560,18 +734,11 @@ class SettingsRequest(BaseModel):
 
 @app.get("/settings")
 def get_settings():
-    sec_key = config.r2_secret_access_key
-    masked_key = (sec_key[:4] + "****" + sec_key[-4:]) if len(sec_key) > 8 else ("****" if sec_key else "")
     return {
         "quality_tier": config.quality_tier,
         "allow_dolby_atmos": config.allow_dolby_atmos,
         "download_directory": config.download_directory,
         "r2_enabled": config.r2_enabled,
-        "r2_account_id": config.r2_account_id,
-        "r2_access_key_id": config.r2_access_key_id,
-        "r2_secret_access_key": masked_key,
-        "r2_bucket_name": config.r2_bucket_name,
-        "r2_public_domain": config.r2_public_domain,
         "r2_configured": r2_storage.is_configured()
     }
 

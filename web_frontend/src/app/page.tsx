@@ -27,6 +27,13 @@ import {
   Square,
   Sparkles,
   Globe,
+  Play,
+  Pause,
+  Volume2,
+  Star,
+  ListPlus,
+  FileText,
+  Bookmark,
 } from "lucide-react";
 import {
   getAuthStatus,
@@ -41,6 +48,8 @@ import {
   getAlbumTracks,
   getPlaylistTracks,
   clearServerCache,
+  getPreviewUrl,
+  resolveBatchLinks,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
@@ -129,6 +138,72 @@ function getSubtitle(item: any, type: string): string {
   return "";
 }
 
+/* ─── Helper: Render Quality Badges ─── */
+function renderQualityBadge(item: any) {
+  if (!item) return null;
+  const aq = item.audioQuality || item.quality || "";
+  const modes = item.audioModes || [];
+  const tags = item.mediaMetadata?.tags || [];
+
+  const isAtmos = modes.includes("DOLBY_ATMOS") || tags.includes("DOLBY_ATMOS");
+  const isHiRes = aq === "HI_RES_LOSSLESS" || aq === "HI_RES" || tags.includes("HIRES_LOSSLESS");
+  const isLossless = aq === "LOSSLESS";
+  const isHigh = aq === "HIGH";
+
+  if (!isAtmos && !isHiRes && !isLossless && !isHigh) return null;
+
+  return (
+    <div className="flex items-center gap-1 flex-wrap mt-1">
+      {isHiRes && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.25)] flex items-center gap-1">
+          <Sparkles className="w-2.5 h-2.5 text-amber-300" /> 24-bit Hi-Res
+        </span>
+      )}
+      {isLossless && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+          FLAC
+        </span>
+      )}
+      {isAtmos && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+          Dolby Atmos
+        </span>
+      )}
+      {isHigh && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-500/20 text-zinc-400 border border-zinc-500/30">
+          320k AAC
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* ─── Helper: Export M3U Playlist ─── */
+function exportPlaylistM3U(items: any[], filename = "tdl_playlist.m3u") {
+  if (!items || !items.length) {
+    toast.error("No tracks to export");
+    return;
+  }
+  let m3u = "#EXTM3U\n";
+  for (const item of items) {
+    const title = item.title || item.name || "Track";
+    const artist = getArtistText(item, item.type || "tracks");
+    const duration = item.duration || -1;
+    const itemType = item.numberOfTracks ? (item.uuid ? "playlist" : "album") : "track";
+    const itemId = item.id || item.uuid || item.taskId;
+    m3u += `#EXTINF:${duration},${artist} - ${title}\n`;
+    m3u += `https://listen.tidal.com/${itemType}/${itemId}\n\n`;
+  }
+  const blob = new Blob([m3u], { type: "audio/x-mpegurl" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast.success(`Exported ${items.length} item(s) to ${filename}`);
+}
+
 /* ─── Main Component ─── */
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -137,6 +212,19 @@ export default function Home() {
   const [type, setType] = useState("tracks");
   const [results, setResults] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // New Features States
+  const [bookmarks, setBookmarks] = useState<any[]>([]);
+  const [previewTrack, setPreviewTrack] = useState<{
+    trackId: string;
+    url: string;
+    title: string;
+    artist: string;
+    coverUrl?: string;
+  } | null>(null);
+  const [isLoadingPreviewId, setIsLoadingPreviewId] = useState<string | null>(null);
+  const [isBulkOpen, setIsBulkOpen] = useState(false);
+  const [isResolvingBulk, setIsResolvingBulk] = useState(false);
 
   const [showPasteInput, setShowPasteInput] = useState(false);
   const [authUrl, setAuthUrl] = useState("");
@@ -170,7 +258,79 @@ export default function Home() {
   /* ─── Effects ─── */
   useEffect(() => {
     setHasMounted(true);
+    try {
+      const saved = localStorage.getItem("tdl_bookmarks");
+      if (saved) setBookmarks(JSON.parse(saved));
+    } catch {}
   }, []);
+
+  const toggleBookmark = (item: any) => {
+    const id = String(item.id || item.uuid);
+    const exists = bookmarks.some((b) => String(b.id || b.uuid) === id);
+    let updated: any[];
+    if (exists) {
+      updated = bookmarks.filter((b) => String(b.id || b.uuid) !== id);
+      toast.info("Removed from bookmarks");
+    } else {
+      updated = [item, ...bookmarks];
+      toast.success("Saved to bookmarks ⭐");
+    }
+    setBookmarks(updated);
+    try {
+      localStorage.setItem("tdl_bookmarks", JSON.stringify(updated));
+    } catch {}
+  };
+
+  const handlePlayPreview = async (item: any) => {
+    const trackId = String(item.id || item.uuid);
+    if (!trackId) return;
+
+    if (previewTrack?.trackId === trackId) {
+      setPreviewTrack(null);
+      return;
+    }
+
+    setIsLoadingPreviewId(trackId);
+    try {
+      const res = await getPreviewUrl(trackId);
+      if (res.preview_url) {
+        setPreviewTrack({
+          trackId,
+          url: res.preview_url,
+          title: item.title || item.name || "Track",
+          artist: getArtistText(item, "tracks"),
+          coverUrl: getCoverUrl(item, "tracks") || undefined,
+        });
+      } else {
+        toast.error("Preview unavailable for this track");
+      }
+    } catch (e: any) {
+      toast.error("Could not load track preview");
+    } finally {
+      setIsLoadingPreviewId(null);
+    }
+  };
+
+  const handleStartBulkDownload = async (urls: string[]) => {
+    setIsResolvingBulk(true);
+    toast.info(`Processing ${urls.length} link(s)...`);
+    try {
+      const res = await resolveBatchLinks(urls);
+      const items = res.resolved || [];
+      if (!items.length) {
+        toast.error("No valid tracks/albums found in submitted links");
+        return;
+      }
+      toast.success(`Found ${items.length} downloadable item(s)! Queueing downloads...`);
+      for (const entry of items) {
+        handleDownload(entry.item);
+      }
+    } catch (e: any) {
+      toast.error("Failed to process batch links");
+    } finally {
+      setIsResolvingBulk(false);
+    }
+  };
 
   const fetchAuth = useCallback(() => {
     getAuthStatus()
@@ -409,6 +569,9 @@ export default function Home() {
       const data = await search(query, searchType);
       if (data.resolved_type && data.resolved_type !== searchType) {
         setType(data.resolved_type);
+      }
+      if (data.converted_from) {
+        toast.info(`Link resolved from ${data.converted_from} → Tidal`);
       }
       setResults(data.items || []);
     } catch (err: any) {
@@ -719,11 +882,11 @@ export default function Home() {
   ════════════════════════════════════════════════════════════════════════ */
   return (
     <div className="flex min-h-screen min-h-dvh bg-background relative overflow-x-hidden">
-      {/* ── Desktop Sidebar ── */}
-      <aside className="w-[260px] border-r border-white/[0.06] bg-sidebar hidden lg:flex flex-col shrink-0 sticky top-0 h-screen">
+      {/* ── Desktop Sidebar (Fixed) ── */}
+      <aside className="w-[260px] border-r border-white/[0.06] bg-sidebar hidden lg:flex flex-col fixed top-0 left-0 bottom-0 z-30 h-screen overflow-hidden">
         {/* Brand */}
-        <div className="p-5 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-primary/10 border border-primary/20 flex items-center justify-center">
+        <div className="p-5 flex items-center gap-3 border-b border-white/[0.04]">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
             <Waves className="w-5 h-5 text-primary" />
           </div>
           <div>
@@ -737,12 +900,29 @@ export default function Home() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-2 space-y-1">
+        <nav className="flex-1 px-3 py-3 space-y-1 overflow-y-auto">
           <Button
-            variant="secondary"
+            variant={type !== "bookmarks" ? "secondary" : "ghost"}
             className="w-full justify-start font-medium h-10 rounded-xl"
+            onClick={() => {
+              if (type === "bookmarks") setType("tracks");
+            }}
           >
-            <SearchIcon className="w-4 h-4 mr-3" /> Search
+            <SearchIcon className="w-4 h-4 mr-3 text-primary" /> Search
+          </Button>
+          <Button
+            variant="ghost"
+            className="w-full justify-start font-medium h-10 rounded-xl text-muted-foreground hover:text-foreground"
+            onClick={() => setIsBulkOpen(true)}
+          >
+            <ListPlus className="w-4 h-4 mr-3 text-primary" /> Bulk Downloader
+          </Button>
+          <Button
+            variant={type === "bookmarks" ? "secondary" : "ghost"}
+            className="w-full justify-start font-medium h-10 rounded-xl text-muted-foreground hover:text-foreground"
+            onClick={() => setType("bookmarks")}
+          >
+            <Star className="w-4 h-4 mr-3 text-amber-400" /> Saved ({bookmarks.length})
           </Button>
           <Button
             variant="ghost"
@@ -760,7 +940,7 @@ export default function Home() {
         </nav>
 
         {/* Settings and Account at bottom */}
-        <div className="p-3 border-t border-white/[0.06] space-y-2">
+        <div className="p-3 border-t border-white/[0.06] space-y-2 shrink-0">
           {/* User Account Badge */}
           {userInfo && (
             <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
@@ -819,6 +999,15 @@ export default function Home() {
             <Button
               variant="ghost"
               size="icon"
+              className="w-9 h-9 rounded-full relative hover:bg-white/10"
+              onClick={() => setIsBulkOpen(true)}
+              title="Bulk Multi-Link Downloader"
+            >
+              <ListPlus className="w-4 h-4 text-primary" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               className="w-9 h-9 rounded-full relative"
               onClick={() => setShowDownloads(!showDownloads)}
             >
@@ -845,7 +1034,7 @@ export default function Home() {
       </div>
 
       {/* ── Main Content ── */}
-      <main className="flex-1 flex flex-col min-w-0 relative overflow-x-hidden">
+      <main className="flex-1 flex flex-col min-w-0 relative overflow-x-hidden lg:pl-[260px]">
         {/* Ambient glow */}
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-primary/[0.04] blur-[150px] rounded-full pointer-events-none" />
         <div className="absolute bottom-1/3 left-0 w-[400px] h-[400px] bg-chart-3/[0.03] blur-[120px] rounded-full pointer-events-none" />
@@ -884,9 +1073,9 @@ export default function Home() {
             <Tabs
               value={type}
               onValueChange={handleTabChange}
-              className="mb-6 flex justify-center w-full"
+              className="mb-6 flex flex-col items-center w-full"
             >
-              <TabsList className="grid grid-cols-4 w-full max-w-md mx-auto h-11 p-1 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+              <TabsList className="grid grid-cols-5 w-full max-w-xl mx-auto h-11 p-1 rounded-xl bg-white/[0.04] border border-white/[0.06]">
                 <TabsTrigger
                   value="tracks"
                   className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
@@ -915,8 +1104,26 @@ export default function Home() {
                   <User className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block" />
                   <span className="truncate">Artists</span>
                 </TabsTrigger>
+                <TabsTrigger
+                  value="bookmarks"
+                  className="rounded-lg text-[11px] sm:text-xs md:text-sm font-medium flex items-center justify-center min-w-0 h-full"
+                >
+                  <Star className="w-3.5 h-3.5 mr-1.5 shrink-0 hidden sm:inline-block text-amber-400" />
+                  <span className="truncate">Saved ({bookmarks.length})</span>
+                </TabsTrigger>
               </TabsList>
             </Tabs>
+
+            {type === "bookmarks" && bookmarks.length > 0 && (
+              <div className="flex justify-end mb-4">
+                <Button
+                  onClick={() => exportPlaylistM3U(bookmarks, "my_tdl_bookmarks.m3u")}
+                  className="text-xs font-semibold gap-1.5 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 border border-amber-500/30"
+                >
+                  <FileText className="w-3.5 h-3.5" /> Export Playlist (.m3u)
+                </Button>
+              </div>
+            )}
 
             {/* Results Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4">
@@ -933,8 +1140,8 @@ export default function Home() {
                       </div>
                     </div>
                   ))
-                : results.length > 0
-                  ? results.map((item, idx) => (
+                : (type === "bookmarks" ? bookmarks : results).length > 0
+                  ? (type === "bookmarks" ? bookmarks : results).map((item, idx) => (
                       <div
                         key={`${type}-${item.id || item.uuid || idx}-${idx}`}
                         className="group flex items-center gap-3 p-3 rounded-2xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.05] hover:border-primary/20 transition-all duration-200 cursor-pointer animate-slide-up-fade"
@@ -942,9 +1149,9 @@ export default function Home() {
                       >
                         {/* Cover Art */}
                         <div className="w-14 h-14 md:w-16 md:h-16 rounded-xl bg-white/[0.04] overflow-hidden flex-shrink-0 relative">
-                          {getCoverUrl(item, type) ? (
+                          {getCoverUrl(item, type === "bookmarks" ? (item.type || "tracks") : type) ? (
                             <img
-                              src={getCoverUrl(item, type)!}
+                              src={getCoverUrl(item, type === "bookmarks" ? (item.type || "tracks") : type)!}
                               alt={item.title || item.name || "Cover"}
                               className="w-full h-full object-cover"
                               loading="lazy"
@@ -959,7 +1166,6 @@ export default function Home() {
                               <Music className="w-6 h-6 text-primary/40" />
                             </div>
                           )}
-                          {/* Hover overlay — download icon */}
                           {type !== "artists" && (
                             <div
                               className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity rounded-xl"
@@ -982,18 +1188,57 @@ export default function Home() {
                             {item.title || item.name}
                           </h3>
                           <p className="text-xs md:text-sm text-muted-foreground truncate mt-0.5">
-                            {getArtistText(item, type)}
+                            {getArtistText(item, type === "bookmarks" ? (item.type || "tracks") : type)}
                           </p>
-                          {getSubtitle(item, type) && (
+                          {getSubtitle(item, type === "bookmarks" ? (item.type || "tracks") : type) && (
                             <p className="text-[11px] text-muted-foreground/50 mt-0.5 font-mono">
-                              {getSubtitle(item, type)}
+                              {getSubtitle(item, type === "bookmarks" ? (item.type || "tracks") : type)}
                             </p>
                           )}
+                          {renderQualityBadge(item)}
                         </div>
 
-                        {/* Action buttons — visible on mobile always, on desktop on hover */}
+                        {/* Action buttons */}
                         {type !== "artists" && (
                           <div className="flex items-center gap-1 shrink-0">
+                            {(type === "tracks" || type === "bookmarks" || item.type === "track") && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="w-9 h-9 md:w-10 md:h-10 rounded-xl shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all active:scale-90"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePlayPreview(item);
+                                }}
+                                title="Preview 30s audio"
+                              >
+                                {isLoadingPreviewId === String(item.id || item.uuid) ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                                ) : previewTrack?.trackId === String(item.id || item.uuid) ? (
+                                  <Pause className="w-4 h-4 text-primary" />
+                                ) : (
+                                  <Play className="w-4 h-4" />
+                                )}
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="w-9 h-9 md:w-10 md:h-10 rounded-xl shrink-0 text-muted-foreground hover:text-amber-400 hover:bg-amber-400/10 transition-all active:scale-90"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleBookmark(item);
+                              }}
+                              title="Toggle Bookmark"
+                            >
+                              <Star
+                                className={`w-4 h-4 ${
+                                  bookmarks.some((b) => (b.id || b.uuid) === (item.id || item.uuid))
+                                    ? "text-amber-400 fill-amber-400"
+                                    : ""
+                                }`}
+                              />
+                            </Button>
                             {(type === "albums" || type === "playlists") && (
                               <Button
                                 variant="ghost"
@@ -1206,6 +1451,18 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Bulk Downloader Modal & Audio Preview Player Bar */}
+      <BulkDownloadDialog
+        isOpen={isBulkOpen}
+        onClose={() => setIsBulkOpen(false)}
+        onStartBulk={handleStartBulkDownload}
+        isResolving={isResolvingBulk}
+      />
+      <PreviewPlayerBar
+        preview={previewTrack}
+        onClose={() => setPreviewTrack(null)}
+      />
     </div>
   );
 }
@@ -1334,85 +1591,6 @@ function SettingsDialog({
               }`}
             />
           </button>
-        </div>
-
-        {/* Cloudflare R2 Bucket Section */}
-        <div className="space-y-3 pt-2 border-t border-white/[0.06]">
-          <div className="flex items-center justify-between">
-            <div>
-              <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 flex items-center gap-1.5">
-                Cloudflare R2 Bucket Dump
-                {settings.r2_configured && (
-                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
-                    Active
-                  </span>
-                )}
-              </Label>
-              <p className="text-[11px] text-muted-foreground/60 mt-0.5">
-                Temporary dump storage for large downloads
-              </p>
-            </div>
-            <button
-              onClick={() => onSettingChange("r2_enabled", !settings.r2_enabled)}
-              className={`w-11 h-6 rounded-full relative transition-colors ${
-                settings.r2_enabled ? "bg-primary" : "bg-white/10"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
-                  settings.r2_enabled ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
-
-          {settings.r2_enabled && (
-            <div className="space-y-2.5 pt-1">
-              <div>
-                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Account ID</Label>
-                <Input
-                  type="text"
-                  placeholder="e.g. a1b2c3d4e5f6..."
-                  value={settings.r2_account_id || ""}
-                  onChange={(e) => onSettingChange("r2_account_id", e.target.value)}
-                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
-                />
-              </div>
-
-              <div>
-                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Access Key ID</Label>
-                <Input
-                  type="text"
-                  placeholder="R2 Access Key"
-                  value={settings.r2_access_key_id || ""}
-                  onChange={(e) => onSettingChange("r2_access_key_id", e.target.value)}
-                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
-                />
-              </div>
-
-              <div>
-                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Secret Access Key</Label>
-                <Input
-                  type="password"
-                  placeholder="R2 Secret Key"
-                  value={settings.r2_secret_access_key || ""}
-                  onChange={(e) => onSettingChange("r2_secret_access_key", e.target.value)}
-                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
-                />
-              </div>
-
-              <div>
-                <Label className="text-[11px] text-muted-foreground/80 mb-1 block">Bucket Name</Label>
-                <Input
-                  type="text"
-                  placeholder="e.g. tdl-temp-dump"
-                  value={settings.r2_bucket_name || ""}
-                  onChange={(e) => onSettingChange("r2_bucket_name", e.target.value)}
-                  className="h-8 text-xs bg-white/[0.03] border-white/[0.08]"
-                />
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </DialogContent>
@@ -1580,5 +1758,164 @@ function TrackSelectionDialog({
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   BULK MULTI-LINK DOWNLOAD DIALOG
+════════════════════════════════════════════════════════════════════════ */
+function BulkDownloadDialog({
+  isOpen,
+  onClose,
+  onStartBulk,
+  isResolving,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onStartBulk: (urls: string[]) => void;
+  isResolving: boolean;
+}) {
+  const [text, setText] = useState("");
+
+  const handleStart = () => {
+    const lines = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (!lines.length) {
+      toast.error("Please enter at least one URL");
+      return;
+    }
+    onStartBulk(lines);
+    setText("");
+    onClose();
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-[540px] bg-background/95 backdrop-blur-xl border-white/10 text-foreground">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-lg font-bold">
+            <ListPlus className="w-5 h-5 text-primary" />
+            Bulk Multi-Link Downloader
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          Paste multiple links from <b>Tidal, Spotify, Deezer, Apple Music, or YouTube Music</b> (one link per line).
+        </p>
+        <textarea
+          rows={6}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="https://listen.tidal.com/track/123456&#10;https://open.spotify.com/track/4cOdK2wGLETKB...&#10;https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+          className="w-full rounded-xl bg-white/[0.03] border border-white/10 p-3 text-xs font-mono text-foreground placeholder:text-muted-foreground/30 focus:ring-1 focus:ring-primary focus:outline-none resize-none"
+        />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="ghost" onClick={onClose} className="text-xs">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleStart}
+            disabled={isResolving}
+            className="text-xs font-semibold gap-1.5"
+          >
+            {isResolving ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Download className="w-3.5 h-3.5" />
+            )}
+            Start Batch Download
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   MINI AUDIO PREVIEW PLAYER BAR
+════════════════════════════════════════════════════════════════════════ */
+function PreviewPlayerBar({
+  preview,
+  onClose,
+}: {
+  preview: { trackId: string; url: string; title: string; artist: string; coverUrl?: string } | null;
+  onClose: () => void;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    if (preview && audioRef.current) {
+      audioRef.current.src = preview.url;
+      audioRef.current
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(() => setIsPlaying(false));
+    }
+  }, [preview]);
+
+  if (!preview) return null;
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play();
+      setIsPlaying(true);
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (!audioRef.current) return;
+    const cur = audioRef.current.currentTime;
+    const dur = audioRef.current.duration || 30;
+    setProgress((cur / dur) * 100);
+  };
+
+  return (
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-background/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-3 shadow-2xl flex items-center gap-3.5">
+      <audio
+        ref={audioRef}
+        onTimeUpdate={handleTimeUpdate}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <div className="w-10 h-10 rounded-lg overflow-hidden bg-white/5 shrink-0 border border-white/10 flex items-center justify-center">
+        {preview.coverUrl ? (
+          <img src={preview.coverUrl} alt={preview.title} className="w-full h-full object-cover" />
+        ) : (
+          <Music className="w-5 h-5 text-primary" />
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-semibold truncate text-foreground">{preview.title}</p>
+          <span className="text-[10px] font-mono text-primary/80 shrink-0">30s Preview</span>
+        </div>
+        <p className="text-[11px] text-muted-foreground truncate">{preview.artist}</p>
+        <div className="w-full bg-white/10 h-1 rounded-full mt-1.5 overflow-hidden">
+          <div className="bg-primary h-full transition-all duration-200" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          onClick={togglePlay}
+          className="w-9 h-9 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 transition-transform shadow-lg shadow-primary/20"
+        >
+          {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+        </button>
+        <button
+          onClick={onClose}
+          className="w-7 h-7 rounded-full text-muted-foreground hover:bg-white/10 flex items-center justify-center transition-colors ml-1"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
   );
 }

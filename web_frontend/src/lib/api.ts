@@ -102,3 +102,19 @@ export async function clearServerCache() {
   return res.json();
 }
 
+export async function getPreviewUrl(trackId: string) {
+  const res = await fetch(`${API_BASE}/preview/${trackId}`);
+  if (!res.ok) throw new Error("Failed to fetch preview URL");
+  return res.json();
+}
+
+export async function resolveBatchLinks(urls: string[]) {
+  const res = await fetch(`${API_BASE}/batch/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+  });
+  if (!res.ok) throw new Error("Failed to resolve batch links");
+  return res.json();
+}
+
