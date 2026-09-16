@@ -230,7 +230,7 @@ export default function Home() {
   const [authUrl, setAuthUrl] = useState("");
 
   const [settings, setSettings] = useState({
-    quality_tier: "LOSSLESS",
+    quality_tier: "MAX",
     allow_dolby_atmos: false,
     r2_enabled: false,
     r2_account_id: "",
@@ -261,7 +261,33 @@ export default function Home() {
     try {
       const saved = localStorage.getItem("tdl_bookmarks");
       if (saved) setBookmarks(JSON.parse(saved));
+
+      const savedSettings = localStorage.getItem("tdl_settings");
+      if (savedSettings) {
+        const parsed = JSON.parse(savedSettings);
+        setSettings((prev) => ({
+          ...prev,
+          ...parsed,
+          quality_tier: parsed.quality_tier === "HI_RES_LOSSLESS" ? "MAX" : (parsed.quality_tier || "MAX"),
+        }));
+      }
     } catch {}
+
+    // Seamlessly fetch settings from server on web startup
+    getSettings()
+      .then((serverSettings) => {
+        if (serverSettings) {
+          const normalized = {
+            ...serverSettings,
+            quality_tier: serverSettings.quality_tier === "HI_RES_LOSSLESS" ? "MAX" : (serverSettings.quality_tier || "MAX"),
+          };
+          setSettings((prev) => ({ ...prev, ...normalized }));
+          try {
+            localStorage.setItem("tdl_settings", JSON.stringify(normalized));
+          } catch {}
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const toggleBookmark = (item: any) => {
@@ -363,7 +389,18 @@ export default function Home() {
     if (isAuthenticated) {
       localStorage.setItem("tdl_auth", "true");
       fetchAuth();
-      getSettings().then(setSettings).catch(console.error);
+      getSettings().then((serverSettings) => {
+        if (serverSettings) {
+          const normalized = {
+            ...serverSettings,
+            quality_tier: serverSettings.quality_tier === "HI_RES_LOSSLESS" ? "MAX" : (serverSettings.quality_tier || "MAX"),
+          };
+          setSettings((prev) => ({ ...prev, ...normalized }));
+          try {
+            localStorage.setItem("tdl_settings", JSON.stringify(normalized));
+          } catch {}
+        }
+      }).catch(console.error);
     }
   }, [isAuthenticated, fetchAuth]);
 
@@ -595,11 +632,19 @@ export default function Home() {
   const handleSettingChange = async (key: string, value: any) => {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
+
+    // 1. Instant local persistence (never lost on reload or offline)
+    try {
+      localStorage.setItem("tdl_settings", JSON.stringify(updated));
+    } catch {}
+
+    // 2. Sync with backend API
     try {
       await updateSettings(updated);
       toast.success("Preferences auto-saved", { duration: 1500 });
-    } catch {
-      toast.error("Failed to save settings");
+    } catch (err) {
+      // Backend temporarily unreachable, but saved locally
+      toast.info("Saved locally (offline mode)", { duration: 1500 });
     }
   };
 

@@ -5,6 +5,7 @@ import asyncio
 import zipfile
 import time
 import gc
+import tempfile
 import urllib.parse
 import aiohttp
 from pathlib import Path
@@ -34,8 +35,8 @@ api = TidalAPI(config)
 downloader = DownloadManager(api, config)
 r2_storage = R2StorageManager(config)
 
-# Make sure temp directory exists for zipping
-TEMP_DIR = os.path.expanduser("~/Music/Tidal_Temp_Zips")
+# Make sure temp directory exists for zipping (portable across OS and containers)
+TEMP_DIR = os.environ.get("TEMP_DIR", os.path.join(tempfile.gettempdir(), "Tidal_Temp_Zips"))
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
@@ -665,10 +666,18 @@ async def get_preview_endpoint(track_id: str):
     try:
         info = await api.get_stream_info(track_id, "LOW")
         url = info.get("url")
+        if not url and info.get("type") == "dash":
+            segment_urls = info.get("segment_urls", [])
+            if segment_urls:
+                url = segment_urls[0]
+            else:
+                url = info.get("init_url")
+
         if not url:
             raise Exception("No preview stream URL available.")
         return {"status": "success", "preview_url": url}
     except Exception as e:
+        print(f"Preview error for track {track_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -734,8 +743,11 @@ class SettingsRequest(BaseModel):
 
 @app.get("/settings")
 def get_settings():
+    tier = config.quality_tier
+    if tier == "HI_RES_LOSSLESS":
+        tier = "MAX"
     return {
-        "quality_tier": config.quality_tier,
+        "quality_tier": tier,
         "allow_dolby_atmos": config.allow_dolby_atmos,
         "download_directory": config.download_directory,
         "r2_enabled": config.r2_enabled,
@@ -745,7 +757,10 @@ def get_settings():
 @app.post("/settings")
 def update_settings(req: SettingsRequest):
     if req.quality_tier:
-        config.quality_tier = req.quality_tier
+        tier = req.quality_tier
+        if tier == "MAX":
+            tier = "HI_RES_LOSSLESS"
+        config.quality_tier = tier
     if req.allow_dolby_atmos is not None:
         config.allow_dolby_atmos = req.allow_dolby_atmos
     if req.r2_enabled is not None:
@@ -765,4 +780,5 @@ def update_settings(req: SettingsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)

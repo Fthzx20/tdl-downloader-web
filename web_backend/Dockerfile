@@ -14,12 +14,12 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000
 
-# Copy and install dependencies
-COPY web_backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r ./requirements.txt
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application files
-COPY web_backend/ .
+COPY . .
 
 # Expose port (default 8000)
 EXPOSE 8000

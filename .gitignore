@@ -20,6 +20,8 @@ web_backend/tidal_rip/__pycache__/
 
 # Local Temp & Scratch Folders
 scratch/
+testenv/
+config.json
 .env
 .env.local
 .env.development.local

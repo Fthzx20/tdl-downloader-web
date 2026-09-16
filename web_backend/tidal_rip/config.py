@@ -37,8 +37,7 @@ class Config:
         self.token_expiry = 0.0
         self.user_id = ""
         self.user_name = ""
-        self.download_directory = os.path.expanduser("~/Music/Tidal Downloads")
-        self.quality_tier = "LOSSLESS"  # Options: LOW, HIGH, LOSSLESS, MAX
+        self.quality_tier = "HI_RES_LOSSLESS"  # Options: LOW, HIGH, LOSSLESS, MAX, HI_RES_LOSSLESS
         self.login_browser = "Default Browser"
         self.allow_dolby_atmos = False
         
@@ -92,7 +91,7 @@ class Config:
             self.user_id = data.get("user_id") or os.environ.get("TIDAL_USER_ID", "")
             self.user_name = data.get("user_name", "")
             self.download_directory = data.get("download_directory", os.path.expanduser("~/Music/Tidal Downloads"))
-            self.quality_tier = data.get("quality_tier", "LOSSLESS")
+            self.quality_tier = data.get("quality_tier", "HI_RES_LOSSLESS")
             self.login_browser = data.get("login_browser", "Default Browser")
             self.allow_dolby_atmos = data.get("allow_dolby_atmos", False)
 
