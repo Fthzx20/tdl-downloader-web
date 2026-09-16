@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install minimal ffmpeg and curl for healthchecks
+# Install minimal ffmpeg and curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -21,8 +21,11 @@ RUN pip install --no-cache-dir -r ./requirements.txt
 # Copy backend application files
 COPY web_backend/ .
 
+# Ensure permissions are open so container runs smoothly under root or non-root user
+RUN chmod -R 777 /app /tmp
+
 # Expose port (default 8000)
 EXPOSE 8000
 
-# Run uvicorn with 1 worker to save RAM on 512MB free tier
-CMD uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
+# Run server.py directly using python for robust port parsing and unbuffered logging
+CMD ["python", "server.py"]

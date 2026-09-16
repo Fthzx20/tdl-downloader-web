@@ -1,6 +1,7 @@
 import json
 import os
 import base64
+import tempfile
 
 class Config:
     """Manages application settings, secure tokens, and download configurations."""
@@ -22,8 +23,16 @@ class Config:
     PKCE_REDIRECT_URI = "https://tidal.com/android/login/auth"
     
     def __init__(self):
-        # Store configuration securely in user's home directory
-        self.config_dir = os.path.expanduser("~/.tidal_rip")
+        # Determine a safe, writable directory for config (works across Windows, Linux, and non-root containers)
+        config_dir_env = os.environ.get("CONFIG_DIR")
+        if config_dir_env:
+            self.config_dir = config_dir_env
+        else:
+            home = os.path.expanduser("~")
+            if os.path.exists(home) and os.access(home, os.W_OK):
+                self.config_dir = os.path.join(home, ".tidal_rip")
+            else:
+                self.config_dir = os.path.join(tempfile.gettempdir(), ".tidal_rip")
         self.config_path = os.path.join(self.config_dir, "config.json")
         
         # Default settings
@@ -111,7 +120,6 @@ class Config:
 
     def save(self):
         """Saves current configuration to file."""
-        os.makedirs(self.config_dir, exist_ok=True)
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -132,10 +140,11 @@ class Config:
             "r2_public_domain": self.r2_public_domain
         }
         try:
+            os.makedirs(self.config_dir, exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Error saving configuration: {e}")
+            print(f"Notice: Could not save configuration to {self.config_path}: {e}")
             
         try:
             backup_path = os.path.join(os.getcwd(), "config.json")

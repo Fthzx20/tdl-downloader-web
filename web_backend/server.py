@@ -37,7 +37,10 @@ r2_storage = R2StorageManager(config)
 
 # Make sure temp directory exists for zipping (portable across OS and containers)
 TEMP_DIR = os.environ.get("TEMP_DIR", os.path.join(tempfile.gettempdir(), "Tidal_Temp_Zips"))
-os.makedirs(TEMP_DIR, exist_ok=True)
+try:
+    os.makedirs(TEMP_DIR, exist_ok=True)
+except Exception:
+    TEMP_DIR = tempfile.gettempdir()
 
 
 def require_auth():
@@ -241,6 +244,11 @@ def clear_cache_endpoint():
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Tidal Rip API is running."}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "healthy": True}
 
 
 @app.get("/auth/status")
@@ -780,5 +788,10 @@ def update_settings(req: SettingsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+    raw_port = os.environ.get("PORT", "8000")
+    try:
+        port = int(raw_port)
+    except Exception:
+        port = 8000
+    print(f"Starting Tidal Rip API on 0.0.0.0:{port}...", flush=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=port, workers=1, reload=False)
