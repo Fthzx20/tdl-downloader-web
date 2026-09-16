@@ -510,7 +510,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         if not items:
             raise Exception("No tracks found on this album.")
             
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
@@ -581,7 +581,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         if not items:
             raise Exception("No tracks found in this playlist.")
             
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
