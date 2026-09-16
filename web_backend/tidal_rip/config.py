@@ -46,6 +46,15 @@ class Config:
         self.token_expiry = 0.0
         self.user_id = ""
         self.user_name = ""
+        # Determine default download directory
+        default_dl = os.environ.get("DOWNLOAD_DIRECTORY")
+        if not default_dl:
+            home = os.path.expanduser("~")
+            if os.path.exists(home) and os.access(home, os.W_OK):
+                default_dl = os.path.join(home, "Music", "Tidal Downloads")
+            else:
+                default_dl = os.path.join(tempfile.gettempdir(), "Tidal Downloads")
+        self.download_directory = default_dl
         self.quality_tier = "HI_RES_LOSSLESS"  # Options: LOW, HIGH, LOSSLESS, MAX, HI_RES_LOSSLESS
         self.login_browser = "Default Browser"
         self.allow_dolby_atmos = False
