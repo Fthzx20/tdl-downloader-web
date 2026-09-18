@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
+import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
 const inter = Inter({
@@ -14,6 +15,16 @@ export const metadata: Metadata = {
   description: "A premium web interface for downloading high-fidelity tracks, albums, and playlists from Tidal in pristine FLAC quality.",
   keywords: ["tidal", "music", "downloader", "flac", "hi-res", "lossless"],
   authors: [{ name: "TDL Rip" }],
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "TDL Rip",
+  },
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export const viewport: Viewport = {
@@ -30,16 +41,19 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${inter.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`${inter.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground overflow-x-hidden">
-        {children}
-        <Toaster
-          position="top-center"
-          toastOptions={{
-            className: "glass-strong border border-white/10 text-foreground",
-          }}
-        />
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
+          {children}
+          <Toaster
+            position="top-center"
+            toastOptions={{
+              className: "glass-strong border border-white/10 text-foreground",
+            }}
+          />
+        </ThemeProvider>
       </body>
     </html>
   );

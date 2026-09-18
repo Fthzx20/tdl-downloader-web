@@ -9,7 +9,7 @@ import tempfile
 import urllib.parse
 import aiohttp
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -429,11 +429,21 @@ async def search(query: str, type: str = "tracks"):
 
 active_tasks = {}
 completed_tasks = {}  # task_id -> completion timestamp
+ws_subscribers: dict[str, set[WebSocket]] = {}
 
 def mark_task_complete(task_id: str):
-    """Mark a task as complete so the frontend polling can detect it."""
+    """Mark a task as complete so frontend polling and WebSockets can detect it."""
     if task_id:
         completed_tasks[task_id] = time.time()
+        # Broadcast completion to WebSocket subscribers
+        subs = ws_subscribers.pop(task_id, None)
+        if subs:
+            msg = {"status": "complete", "tracks": active_tasks.get(task_id, {})}
+            for ws in subs:
+                try:
+                    asyncio.create_task(ws.send_json(msg))
+                except Exception:
+                    pass
         # Clean up old completed tasks (older than 2 minutes) to prevent memory leak
         now = time.time()
         stale = [tid for tid, ts in completed_tasks.items() if now - ts > 120]
@@ -446,13 +456,60 @@ def create_progress_callback(task_id: str, track_id: str):
         if not task_id: return
         if task_id not in active_tasks:
             active_tasks[task_id] = {}
-        active_tasks[task_id][track_id] = {
+        track_info = {
             "downloaded": downloaded,
             "total": total,
             "status": status,
             "time": time.time()
         }
+        active_tasks[task_id][track_id] = track_info
+
+        # Real-time WebSocket push
+        subs = ws_subscribers.get(task_id)
+        if subs:
+            msg = {
+                "status": "active",
+                "tracks": active_tasks[task_id],
+                "track_id": track_id,
+                "update": track_info
+            }
+            dead = set()
+            for ws in list(subs):
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    dead.add(ws)
+            if dead:
+                subs.difference_update(dead)
     return cb
+
+@app.websocket("/ws/progress/{task_id}")
+async def ws_progress_endpoint(websocket: WebSocket, task_id: str):
+    """Real-time WebSocket endpoint for tracking download progress of a task."""
+    await websocket.accept()
+    if task_id not in ws_subscribers:
+        ws_subscribers[task_id] = set()
+    ws_subscribers[task_id].add(websocket)
+
+    try:
+        if task_id in completed_tasks:
+            await websocket.send_json({"status": "complete", "tracks": active_tasks.get(task_id, {})})
+        elif task_id in active_tasks:
+            await websocket.send_json({"status": "active", "tracks": active_tasks[task_id]})
+        else:
+            await websocket.send_json({"status": "waiting", "tracks": {}})
+
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if task_id in ws_subscribers:
+            ws_subscribers[task_id].discard(websocket)
+            if not ws_subscribers[task_id]:
+                ws_subscribers.pop(task_id, None)
 
 @app.get("/progress/{task_id}")
 def get_progress(task_id: str):

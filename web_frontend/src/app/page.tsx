@@ -34,7 +34,11 @@ import {
   ListPlus,
   FileText,
   Bookmark,
+  Sun,
+  Moon,
+  Clock,
 } from "lucide-react";
+import { useTheme } from "next-themes";
 import {
   getAuthStatus,
   getLoginUrl,
@@ -45,6 +49,7 @@ import {
   getSettings,
   updateSettings,
   getProgress,
+  getWebSocketProgressUrl,
   getAlbumTracks,
   getPlaylistTracks,
   clearServerCache,
@@ -76,6 +81,7 @@ type ActiveDownload = {
   speedText?: string;
   isComplete: boolean;
   isError: boolean;
+  isQueued?: boolean;
   item?: any;
   itemType?: string;
   abortController?: AbortController;
@@ -247,11 +253,14 @@ export default function Home() {
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([]);
   const [showDownloads, setShowDownloads] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
+  const { theme, setTheme } = useTheme();
 
   // Tracks which task_ids have been seen as "active" at least once (for completion detection)
   const taskSeenActive = useRef<Set<string>>(new Set());
   // Tracks any download popup windows to automatically close them when download completes
   const downloadWindowsRef = useRef<Map<string, Window>>(new Map());
+  // Tracks active WebSockets for real-time progress
+  const webSocketsRef = useRef<Map<string, WebSocket>>(new Map());
   // Ref tracking latest activeDownloads to prevent polling interval churn
   const activeDownloadsRef = useRef<ActiveDownload[]>(activeDownloads);
   activeDownloadsRef.current = activeDownloads;
@@ -695,40 +704,106 @@ export default function Home() {
     }
   };
 
-  const handleDownload = async (item: any, overrideType?: string) => {
-    const downloadType =
-      overrideType || (type === "tracks" ? "track" : type === "albums" ? "album" : "playlist");
-    const taskId = Math.random().toString(36).substring(7);
-    const itemId = item.id || item.uuid;
-    const url = `${getDownloadUrl(downloadType, itemId)}?task_id=${taskId}`;
-    const itemTitle = item.title || item.name;
+  const setupWebSocket = useCallback((taskId: string) => {
+    if (typeof window === "undefined" || !("WebSocket" in window)) return;
+    try {
+      const wsUrl = getWebSocketProgressUrl(taskId);
+      const ws = new WebSocket(wsUrl);
+      webSocketsRef.current.set(taskId, ws);
 
-    setShowDownloads(true);
-    setActiveDownloads((prev) => [
-      ...prev,
-      {
-        taskId,
-        title: itemTitle,
-        progress: 0,
-        statusText: "Preparing...",
-        isComplete: false,
-        isError: false,
-        item,
-        itemType: downloadType,
-        createdAt: Date.now(),
-      },
-    ]);
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.status === "complete") {
+            updateDownload(taskId, {
+              statusText: "Downloaded ✓",
+              progress: 100,
+              isComplete: true,
+              isQueued: false,
+            });
+            taskSeenActive.current.delete(taskId);
+            const win = downloadWindowsRef.current.get(taskId);
+            if (win && !win.closed) {
+              try { win.close(); } catch {}
+              downloadWindowsRef.current.delete(taskId);
+            }
+            ws.close();
+            webSocketsRef.current.delete(taskId);
+            return;
+          }
+
+          if (data.status === "active" && data.tracks) {
+            taskSeenActive.current.add(taskId);
+            const trackList = Object.values(data.tracks) as any[];
+            const totalTracks = trackList.length;
+            const finished = trackList.filter(
+              (t: any) => t.downloaded >= t.total && t.total > 0
+            ).length;
+
+            let liveSpeed = "";
+            let singleTrackStatus = "";
+            let calculatedPct = 0;
+
+            if (totalTracks === 1) {
+              const trk = trackList[0];
+              if (trk) {
+                if (trk.status) singleTrackStatus = trk.status;
+                if (trk.total > 0 && trk.downloaded > 0) {
+                  calculatedPct = Math.min(99, Math.round((trk.downloaded / trk.total) * 100));
+                }
+              }
+            } else if (totalTracks > 1) {
+              calculatedPct = Math.round((finished / totalTracks) * 100);
+            }
+
+            for (const t of trackList) {
+              if (t.status && (t.status.includes("MB/s") || t.status.includes("KB/s"))) {
+                const match = t.status.match(/([\d.]+\s*(?:MB|KB)\/s)/);
+                if (match) {
+                  liveSpeed = match[1];
+                  break;
+                }
+              }
+            }
+
+            const statusMsg =
+              totalTracks > 1
+                ? `Downloading · ${finished}/${totalTracks} tracks`
+                : singleTrackStatus || (liveSpeed ? `Downloading from Tidal` : "Downloading from Tidal...");
+
+            updateDownload(taskId, {
+              statusText: statusMsg,
+              speedText: liveSpeed,
+              progress: calculatedPct > 0 ? calculatedPct : undefined,
+              isQueued: false,
+            });
+          }
+        } catch {}
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch {}
+        webSocketsRef.current.delete(taskId);
+      };
+
+      ws.onclose = () => {
+        webSocketsRef.current.delete(taskId);
+      };
+    } catch {}
+  }, [updateDownload]);
+
+  const triggerDownloadExecution = useCallback((d: ActiveDownload) => {
+    const downloadType = d.itemType || "track";
+    const itemId = d.item?.id || d.item?.uuid;
+    const url = `${getDownloadUrl(downloadType, itemId)}?task_id=${d.taskId}`;
 
     try {
       if (settings.open_download_in_tab) {
-        // Open in new tab and auto-close when download completes
         const win = window.open(url, "_blank");
         if (win) {
-          downloadWindowsRef.current.set(taskId, win);
+          downloadWindowsRef.current.set(d.taskId, win);
         }
       } else {
-        // Default: Stream directly to browser disk via hidden iframe
-        // Prevents unwanted blank tabs from ever opening or cluttering the browser!
         const iframe = document.createElement("iframe");
         iframe.style.display = "none";
         iframe.src = url;
@@ -741,21 +816,83 @@ export default function Home() {
           } catch {}
         }, 180000);
       }
-
-      toast.success(`Queued download for "${itemTitle}"`);
+      setupWebSocket(d.taskId);
     } catch (err: any) {
-      const msg = err?.message || `Failed to download "${itemTitle}"`;
-      updateDownload(taskId, {
+      updateDownload(d.taskId, {
         statusText: "Failed",
         isError: true,
         isComplete: true,
+        isQueued: false,
       });
-      toast.error(msg);
+    }
+  }, [settings.open_download_in_tab, setupWebSocket, updateDownload]);
+
+  // Download Queue Processor: runs the next queued download when slots are available
+  useEffect(() => {
+    const activeCount = activeDownloads.filter(
+      (d) => !d.isComplete && !d.isError && !d.isQueued
+    ).length;
+
+    if (activeCount < 1) {
+      const nextQueued = activeDownloads.find(
+        (d) => !d.isComplete && !d.isError && d.isQueued
+      );
+
+      if (nextQueued) {
+        updateDownload(nextQueued.taskId, {
+          isQueued: false,
+          statusText: "Preparing...",
+        });
+        triggerDownloadExecution({ ...nextQueued, isQueued: false });
+        toast.info(`Queue: Starting "${nextQueued.title}"`);
+      }
+    }
+  }, [activeDownloads, triggerDownloadExecution, updateDownload]);
+
+  const handleDownload = async (item: any, overrideType?: string) => {
+    const downloadType =
+      overrideType || (type === "tracks" ? "track" : type === "albums" ? "album" : "playlist");
+    const taskId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(7);
+    const itemTitle = item.title || item.name;
+
+    setShowDownloads(true);
+
+    const currentlyActiveCount = activeDownloadsRef.current.filter(
+      (d) => !d.isComplete && !d.isError && !d.isQueued
+    ).length;
+
+    const shouldQueue = currentlyActiveCount >= 1;
+
+    const newDownload: ActiveDownload = {
+      taskId,
+      title: itemTitle,
+      progress: 0,
+      statusText: shouldQueue ? "Queued in line..." : "Preparing...",
+      isComplete: false,
+      isError: false,
+      isQueued: shouldQueue,
+      item,
+      itemType: downloadType,
+      createdAt: Date.now(),
+    };
+
+    setActiveDownloads((prev) => [...prev, newDownload]);
+
+    if (shouldQueue) {
+      toast.info(`Added to queue: "${itemTitle}"`);
+    } else {
+      triggerDownloadExecution(newDownload);
+      toast.success(`Started download for "${itemTitle}"`);
     }
   };
 
   const handleCancelDownload = (taskId: string) => {
     taskSeenActive.current.delete(taskId);
+    const ws = webSocketsRef.current.get(taskId);
+    if (ws) {
+      try { ws.close(); } catch {}
+      webSocketsRef.current.delete(taskId);
+    }
     const win = downloadWindowsRef.current.get(taskId);
     if (win && !win.closed) {
       try { win.close(); } catch {}
@@ -772,6 +909,7 @@ export default function Home() {
         statusText: "Cancelled",
         isError: true,
         isComplete: true,
+        isQueued: false,
         progress: 0,
       });
       toast.info("Download cancelled");
@@ -902,6 +1040,8 @@ export default function Home() {
   };
 
   const pendingCount = activeDownloads.filter((d) => !d.isComplete).length;
+  const queuedCount = activeDownloads.filter((d) => !d.isComplete && !d.isError && d.isQueued).length;
+  const runningCount = activeDownloads.filter((d) => !d.isComplete && !d.isError && !d.isQueued).length;
 
   /* ════════════════════════════════════════════════════════════════════════
      LOGIN SCREEN / HYDRATION GUARD
@@ -1092,17 +1232,32 @@ export default function Home() {
             </div>
           )}
 
-          <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
-            <DialogTrigger className="w-full flex items-center justify-start px-3 font-medium h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors text-sm">
-              <Settings className="w-4 h-4 mr-3" /> Settings
-            </DialogTrigger>
-            <SettingsDialog
-              settings={settings}
-              onSettingChange={handleSettingChange}
-              userInfo={userInfo}
-              onLogout={handleLogout}
-            />
-          </Dialog>
+          <div className="flex items-center gap-1.5">
+            <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+              <DialogTrigger className="flex-1 flex items-center justify-start px-3 font-medium h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors text-sm">
+                <Settings className="w-4 h-4 mr-3" /> Settings
+              </DialogTrigger>
+              <SettingsDialog
+                settings={settings}
+                onSettingChange={handleSettingChange}
+                userInfo={userInfo}
+                onLogout={handleLogout}
+              />
+            </Dialog>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="w-9 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors shrink-0"
+              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              {theme === "dark" ? (
+                <Sun className="w-4 h-4 text-amber-400" />
+              ) : (
+                <Moon className="w-4 h-4 text-primary" />
+              )}
+            </Button>
+          </div>
         </div>
       </aside>
 
@@ -1124,6 +1279,19 @@ export default function Home() {
               title="Bulk Multi-Link Downloader"
             >
               <ListPlus className="w-4 h-4 text-primary" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              {theme === "dark" ? (
+                <Sun className="w-4 h-4 text-amber-400" />
+              ) : (
+                <Moon className="w-4 h-4 text-primary" />
+              )}
             </Button>
             <Button
               variant="ghost"
@@ -1447,8 +1615,11 @@ export default function Home() {
               </div>
               <span className="font-semibold text-sm">Transfers</span>
               {pendingCount > 0 && (
-                <span className="text-[11px] text-muted-foreground bg-white/[0.06] px-2 py-0.5 rounded-full">
-                  {pendingCount} active
+                <span className="text-[11px] text-muted-foreground bg-white/[0.06] px-2 py-0.5 rounded-full flex items-center gap-1">
+                  <span>{runningCount} active</span>
+                  {queuedCount > 0 && (
+                    <span className="text-amber-400">· {queuedCount} queued</span>
+                  )}
                 </span>
               )}
             </div>
@@ -1540,19 +1711,28 @@ export default function Home() {
                           <AlertCircle className="w-4 h-4 text-destructive" />
                         ) : d.isComplete ? (
                           <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        ) : d.isQueued ? (
+                          <Clock className="w-4 h-4 text-amber-400 animate-pulse" />
                         ) : (
                           <Loader2 className="w-4 h-4 text-primary animate-spin" />
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-sm font-medium truncate block"
+                            title={d.title}
+                          >
+                            {d.title}
+                          </span>
+                          {d.isQueued && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-400 font-semibold uppercase tracking-wider shrink-0">
+                              Queued
+                            </span>
+                          )}
+                        </div>
                         <span
-                          className="text-sm font-medium truncate block"
-                          title={d.title}
-                        >
-                          {d.title}
-                        </span>
-                        <span
-                          className={`text-[11px] ${d.isError ? "text-destructive/80" : d.isComplete ? "text-emerald-400/80" : "text-muted-foreground/70"}`}
+                          className={`text-[11px] ${d.isError ? "text-destructive/80" : d.isComplete ? "text-emerald-400/80" : d.isQueued ? "text-amber-400/80" : "text-muted-foreground/70"}`}
                         >
                           {d.statusText}
                         </span>
@@ -1580,14 +1760,16 @@ export default function Home() {
                         </Button>
                       )}
                       <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0 tabular-nums">
-                        {d.progress}%
+                        {d.isQueued ? "—" : `${d.progress}%`}
                       </span>
                     </div>
                     {!d.isComplete && (
                       <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
                         <div
-                          className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
-                          style={{ width: `${d.progress}%` }}
+                          className={`h-full rounded-full transition-all duration-500 ease-out ${
+                            d.isQueued ? "bg-amber-400/50 w-full animate-pulse" : "bg-primary"
+                          }`}
+                          style={{ width: d.isQueued ? "100%" : `${d.progress}%` }}
                         />
                       </div>
                     )}

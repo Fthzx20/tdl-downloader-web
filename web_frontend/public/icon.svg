@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="pwa-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="#09090b"/>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="none" stroke="url(#pwa-grad)" stroke-width="8" opacity="0.4"/>
+  <!-- Tidal Wave / Music Waves -->
+  <path d="M128 320V192c0-8.8 7.2-16 16-16h48v144h-64z" fill="url(#pwa-grad)" opacity="0.8"/>
+  <path d="M224 352V160c0-8.8 7.2-16 16-16h48v208h-64z" fill="url(#pwa-grad)"/>
+  <path d="M320 320V192c0-8.8 7.2-16 16-16h48v144h-64z" fill="url(#pwa-grad)" opacity="0.8"/>
+  <circle cx="160" cy="352" r="28" fill="url(#pwa-grad)"/>
+  <circle cx="256" cy="384" r="28" fill="url(#pwa-grad)"/>
+  <circle cx="352" cy="352" r="28" fill="url(#pwa-grad)"/>
+</svg>

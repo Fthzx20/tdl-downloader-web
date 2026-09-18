@@ -74,6 +74,11 @@ export async function getProgress(taskId: string) {
   return res.json();
 }
 
+export function getWebSocketProgressUrl(taskId: string) {
+  const wsBase = API_BASE.replace(/^http/, "ws");
+  return `${wsBase}/ws/progress/${taskId}`;
+}
+
 export async function getAlbumTracks(albumId: string) {
   const res = await fetch(`${API_BASE}/album/${albumId}/tracks`);
   if (!res.ok) {
