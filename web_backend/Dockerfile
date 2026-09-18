@@ -21,11 +21,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application files
 COPY . .
 
-# Ensure permissions are open so container runs smoothly under root or non-root user
-RUN chmod -R 777 /app /tmp
+# Ensure temp directories exist with full read/write permissions for Back4App
+RUN mkdir -p /tmp/Tidal_Temp_Zips /tmp/Tidal_Downloads && \
+    chmod -R 777 /app /tmp
 
 # Expose port (default 8000)
 EXPOSE 8000
+
+# Container health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import os, urllib.request; p=os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{p}/health')" || exit 1
 
 # Run server.py directly using python for robust port parsing and unbuffered logging
 CMD ["python", "server.py"]

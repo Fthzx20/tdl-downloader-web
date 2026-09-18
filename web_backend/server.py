@@ -42,7 +42,11 @@ try:
 except Exception:
     TEMP_DIR = tempfile.gettempdir()
 
-DOWNLOAD_SEM = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
+try:
+    max_concur = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2"))
+except (ValueError, TypeError):
+    max_concur = 2
+DOWNLOAD_SEM = asyncio.Semaphore(max(1, max_concur))
 
 
 def require_auth():
@@ -97,7 +101,8 @@ async def resolve_external_link(url: str):
                         if resp.status == 200:
                             d = await resp.json()
                             title = d.get("title", "")
-                            artist = d.get("artist", {}).get("name", "")
+                            artist_data = d.get("artist")
+                            artist = artist_data.get("name", "") if isinstance(artist_data, dict) else ""
                             isrc = d.get("isrc", "")
                             query = isrc if isrc else f"{title} {artist}".strip()
                             return "track", query, "Deezer"
@@ -107,7 +112,8 @@ async def resolve_external_link(url: str):
                         if resp.status == 200:
                             d = await resp.json()
                             title = d.get("title", "")
-                            artist = d.get("artist", {}).get("name", "")
+                            artist_data = d.get("artist")
+                            artist = artist_data.get("name", "") if isinstance(artist_data, dict) else ""
                             return "album", f"{title} {artist}".strip(), "Deezer"
             except Exception as e:
                 print(f"Deezer resolve error: {e}")
@@ -127,7 +133,8 @@ async def resolve_external_link(url: str):
                             data = json.loads(match.group(1))
                             entity = data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
                             name = entity.get("name", "")
-                            artists = [a.get("name") for a in entity.get("artists", []) if a.get("name")]
+                            raw_artists = entity.get("artists", [])
+                            artists = [a.get("name") for a in raw_artists if isinstance(a, dict) and a.get("name")]
                             artist_str = " ".join(artists)
                             item_type = "album" if is_album else "track"
                             return item_type, f"{name} {artist_str}".strip(), "Spotify"
@@ -288,7 +295,7 @@ async def shutdown_event():
 @app.post("/system/clear_cache")
 def clear_cache_endpoint():
     """Manually purges temporary files, zip archives, and cached temp files."""
-    purge_stale_temp_cache(max_age_seconds=0) # Clear all immediately
+    purge_stale_temp_cache(max_age_seconds=60) # Protect active in-progress files
     trim_memory()
     return {"status": "success", "message": "Server temporary cache cleared."}
 
@@ -446,7 +453,7 @@ def mark_task_complete(task_id: str):
                     pass
         # Clean up old completed tasks (older than 2 minutes) to prevent memory leak
         now = time.time()
-        stale = [tid for tid, ts in completed_tasks.items() if now - ts > 120]
+        stale = [tid for tid, ts in list(completed_tasks.items()) if now - ts > 120]
         for tid in stale:
             completed_tasks.pop(tid, None)
             active_tasks.pop(tid, None)
@@ -469,29 +476,27 @@ def create_progress_callback(task_id: str, track_id: str):
         if subs:
             msg = {
                 "status": "active",
-                "tracks": active_tasks[task_id],
-                "track_id": track_id,
-                "update": track_info
+                "tracks": {track_id: track_info}
             }
-            dead = set()
-            for ws in list(subs):
+            dead_ws = set()
+            for ws in subs:
                 try:
                     await ws.send_json(msg)
                 except Exception:
-                    dead.add(ws)
-            if dead:
-                subs.difference_update(dead)
+                    dead_ws.add(ws)
+            for ws in dead_ws:
+                subs.discard(ws)
+
     return cb
 
 @app.websocket("/ws/progress/{task_id}")
-async def ws_progress_endpoint(websocket: WebSocket, task_id: str):
-    """Real-time WebSocket endpoint for tracking download progress of a task."""
+async def websocket_progress(websocket: WebSocket, task_id: str):
     await websocket.accept()
     if task_id not in ws_subscribers:
         ws_subscribers[task_id] = set()
     ws_subscribers[task_id].add(websocket)
-
     try:
+        # Send current state immediately on connect
         if task_id in completed_tasks:
             await websocket.send_json({"status": "complete", "tracks": active_tasks.get(task_id, {})})
         elif task_id in active_tasks:
@@ -523,7 +528,7 @@ def get_progress(task_id: str):
     # Clean up old tasks inactive for > 10 minutes (600s)
     expired = [
         tid for tid, tracks in list(active_tasks.items())
-        if tracks and all(now - t.get("time", 0) > 600 for t in tracks.values())
+        if tracks and all(now - t.get("time", 0) > 600 for t in list(tracks.values()))
     ]
     for tid in expired:
         active_tasks.pop(tid, None)
@@ -539,28 +544,42 @@ def get_progress(task_id: str):
     return {"status": "active", "tracks": active_tasks[task_id]}
 
 def cleanup_empty_dir(path: str):
-    """Background task: removes a directory only if it's empty after file cleanup."""
+    """Background task: removes a directory only if it's empty after file cleanup, protecting system/temp directories."""
     try:
-        if path and os.path.exists(path) and os.path.isdir(path):
-            # Only remove if empty (no other tracks being processed)
-            if not os.listdir(path):
-                os.rmdir(path)
-                # Also try to clean parent if empty (Artist folder)
-                parent = os.path.dirname(path)
-                if parent and os.path.exists(parent) and os.path.isdir(parent) and not os.listdir(parent):
+        if not path or not os.path.exists(path) or not os.path.isdir(path):
+            return
+
+        norm_path = os.path.abspath(path)
+        norm_temp = os.path.abspath(TEMP_DIR)
+        system_temp = os.path.abspath(tempfile.gettempdir())
+        norm_dl = os.path.abspath(config.download_directory)
+
+        # NEVER delete TEMP_DIR, system temp, or base download directory!
+        if norm_path in (norm_temp, system_temp, norm_dl, os.path.dirname(system_temp)):
+            return
+
+        if not os.listdir(norm_path):
+            os.rmdir(norm_path)
+            # Also try to clean parent if empty (Artist folder), but only within download directory
+            parent = os.path.abspath(os.path.dirname(norm_path))
+            if parent not in (norm_temp, system_temp, norm_dl) and parent.startswith(norm_dl):
+                if os.path.exists(parent) and os.path.isdir(parent) and not os.listdir(parent):
                     os.rmdir(parent)
     except Exception:
         pass
 
 
 def _create_zip_archive(zip_path: str, source_dir: str):
-    """Creates a ZIP archive from a directory (runs in thread pool)."""
+    """Creates a ZIP archive from a directory (runs in thread pool), excluding temp and unfinished files."""
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
         for root_dir, dirs, files in os.walk(source_dir):
             for file in files:
+                if file.endswith((".tmp", ".clean.tmp")) or ".remux." in file:
+                    continue
                 file_path = os.path.join(root_dir, file)
-                arcname = os.path.relpath(file_path, source_dir)
-                zipf.write(file_path, arcname)
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    arcname = os.path.relpath(file_path, source_dir)
+                    zipf.write(file_path, arcname)
 
 
 async def serve_or_upload_r2(local_path: str, background_tasks: BackgroundTasks, cleanup_paths: list = None):
@@ -599,24 +618,25 @@ async def serve_or_upload_r2(local_path: str, background_tasks: BackgroundTasks,
 async def download_track(track_id: str, background_tasks: BackgroundTasks, task_id: str = None):
     """Downloads a single track and returns the audio file directly or via R2 redirect."""
     require_auth()
-    try:
-        cb = create_progress_callback(task_id, track_id) if task_id else None
-        final_path = await asyncio.wait_for(
-            downloader.download_track(track_id, progress_callback=cb),
-            timeout=300
-        )
-        if not final_path or not os.path.exists(final_path):
-            raise Exception("Download failed or skipped.")
+    async with DOWNLOAD_SEM:
+        try:
+            cb = create_progress_callback(task_id, track_id) if task_id else None
+            final_path = await asyncio.wait_for(
+                downloader.download_track(track_id, progress_callback=cb),
+                timeout=300
+            )
+            if not final_path or not os.path.exists(final_path):
+                raise Exception("Download failed or skipped.")
+                
+            lrc_path = os.path.splitext(final_path)[0] + ".lrc"
+            cleanup_paths = [lrc_path] if os.path.exists(lrc_path) else []
             
-        lrc_path = os.path.splitext(final_path)[0] + ".lrc"
-        cleanup_paths = [lrc_path] if os.path.exists(lrc_path) else []
-        
-        mark_task_complete(task_id)
-        return await serve_or_upload_r2(final_path, background_tasks, cleanup_paths=cleanup_paths)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            mark_task_complete(task_id)
+            return await serve_or_upload_r2(final_path, background_tasks, cleanup_paths=cleanup_paths)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -866,6 +886,8 @@ async def get_preview_audio_stream(track_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Preview unavailable: {e}")
 
     total_len = len(audio_data)
+    if total_len == 0:
+        raise HTTPException(status_code=416, detail="Preview audio data is empty.")
     range_header = request.headers.get("range")
 
     if range_header and range_header.startswith("bytes="):
@@ -976,7 +998,12 @@ def get_settings():
         "allow_dolby_atmos": config.allow_dolby_atmos,
         "download_directory": config.download_directory,
         "r2_enabled": config.r2_enabled,
-        "r2_configured": r2_storage.is_configured()
+        "r2_configured": r2_storage.is_configured(),
+        "r2_account_id": config.r2_account_id or "",
+        "r2_access_key_id": config.r2_access_key_id or "",
+        "r2_secret_access_key": "********" if config.r2_secret_access_key else "",
+        "r2_bucket_name": config.r2_bucket_name or "",
+        "r2_public_domain": config.r2_public_domain or ""
     }
 
 @app.post("/settings")

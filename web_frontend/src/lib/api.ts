@@ -75,6 +75,17 @@ export async function getProgress(taskId: string) {
 }
 
 export function getWebSocketProgressUrl(taskId: string) {
+  if (typeof window !== "undefined") {
+    if (API_BASE.startsWith("http://") || API_BASE.startsWith("https://")) {
+      const wsBase = API_BASE.replace(/^http/, "ws");
+      return `${wsBase}/ws/progress/${taskId}`;
+    }
+    const loc = window.location;
+    const protocol = loc.protocol === "https:" ? "wss:" : "ws:";
+    const host = loc.host;
+    const base = API_BASE.startsWith("/") ? API_BASE : `/${API_BASE}`;
+    return `${protocol}//${host}${base.replace(/\/$/, "")}/ws/progress/${taskId}`;
+  }
   const wsBase = API_BASE.replace(/^http/, "ws");
   return `${wsBase}/ws/progress/${taskId}`;
 }

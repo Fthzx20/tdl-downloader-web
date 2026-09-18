@@ -103,32 +103,39 @@ class Config:
             else:
                 self.client_id = loaded_client_id
                 self.client_secret = data.get("client_secret", self.DEFAULT_CLIENT_SECRET)
-            self.access_token = data.get("access_token") or os.environ.get("TIDAL_ACCESS_TOKEN", "")
-            self.refresh_token = data.get("refresh_token") or os.environ.get("TIDAL_REFRESH_TOKEN", "")
+            # Environment variables take precedence over saved config.json (vital for container deployments)
+            env_access = os.environ.get("TIDAL_ACCESS_TOKEN")
+            env_refresh = os.environ.get("TIDAL_REFRESH_TOKEN")
+            env_user_id = os.environ.get("TIDAL_USER_ID")
+            env_dl = os.environ.get("DOWNLOAD_DIRECTORY")
+
+            self.access_token = env_access or data.get("access_token") or ""
+            self.refresh_token = env_refresh or data.get("refresh_token") or ""
             self.token_expiry = float(data.get("token_expiry", 0.0))
-            self.user_id = data.get("user_id") or os.environ.get("TIDAL_USER_ID", "")
+            self.user_id = env_user_id or data.get("user_id") or ""
             self.user_name = data.get("user_name", "")
-            self.download_directory = data.get("download_directory", os.path.expanduser("~/Music/Tidal Downloads"))
+            self.download_directory = env_dl or data.get("download_directory") or self.download_directory
             self.quality_tier = data.get("quality_tier", "HI_RES_LOSSLESS")
             self.login_browser = data.get("login_browser", "Default Browser")
             self.allow_dolby_atmos = data.get("allow_dolby_atmos", False)
 
-            # R2 Storage settings
-            self.r2_enabled = data.get("r2_enabled", self.r2_enabled)
-            self.r2_account_id = data.get("r2_account_id", self.r2_account_id)
-            self.r2_access_key_id = data.get("r2_access_key_id", self.r2_access_key_id)
-            self.r2_secret_access_key = data.get("r2_secret_access_key", self.r2_secret_access_key)
-            self.r2_bucket_name = data.get("r2_bucket_name", self.r2_bucket_name)
-            self.r2_public_domain = data.get("r2_public_domain", self.r2_public_domain)
+            # R2 Storage settings (Environment variables take precedence)
+            self.r2_enabled = (os.environ.get("R2_ENABLED", "").lower() == "true") if os.environ.get("R2_ENABLED") else data.get("r2_enabled", self.r2_enabled)
+            self.r2_account_id = os.environ.get("R2_ACCOUNT_ID") or data.get("r2_account_id", self.r2_account_id)
+            self.r2_access_key_id = os.environ.get("R2_ACCESS_KEY_ID") or data.get("r2_access_key_id", self.r2_access_key_id)
+            self.r2_secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY") or data.get("r2_secret_access_key", self.r2_secret_access_key)
+            self.r2_bucket_name = os.environ.get("R2_BUCKET_NAME") or data.get("r2_bucket_name", self.r2_bucket_name)
+            self.r2_public_domain = os.environ.get("R2_PUBLIC_DOMAIN") or data.get("r2_public_domain", self.r2_public_domain)
 
             # Auto-enable R2 only if r2_enabled was not explicitly set in config
-            if "r2_enabled" not in data and self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket_name:
+            if "r2_enabled" not in data and not os.environ.get("R2_ENABLED") and self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket_name:
                 self.r2_enabled = True
         except Exception as e:
             print(f"Error loading configuration: {e}")
 
     def save(self):
         """Saves current configuration to file."""
+        import uuid
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -150,7 +157,7 @@ class Config:
         }
         try:
             os.makedirs(self.config_dir, exist_ok=True)
-            tmp_path = self.config_path + ".tmp"
+            tmp_path = f"{self.config_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
             os.replace(tmp_path, self.config_path)
@@ -159,7 +166,7 @@ class Config:
             
         try:
             backup_path = os.path.join(os.getcwd(), "config.json")
-            tmp_backup = backup_path + ".tmp"
+            tmp_backup = f"{backup_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             with open(tmp_backup, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
             os.replace(tmp_backup, backup_path)

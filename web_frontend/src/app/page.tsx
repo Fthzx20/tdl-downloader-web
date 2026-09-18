@@ -253,17 +253,39 @@ export default function Home() {
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([]);
   const [showDownloads, setShowDownloads] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
-  const { theme, setTheme } = useTheme();
+  const { theme, resolvedTheme, setTheme } = useTheme();
 
   // Tracks which task_ids have been seen as "active" at least once (for completion detection)
   const taskSeenActive = useRef<Set<string>>(new Set());
   // Tracks any download popup windows to automatically close them when download completes
   const downloadWindowsRef = useRef<Map<string, Window>>(new Map());
+  // Tracks download iframes to clean up without leaking
+  const downloadIframesRef = useRef<Map<string, HTMLIFrameElement>>(new Map());
   // Tracks active WebSockets for real-time progress
   const webSocketsRef = useRef<Map<string, WebSocket>>(new Map());
   // Ref tracking latest activeDownloads to prevent polling interval churn
   const activeDownloadsRef = useRef<ActiveDownload[]>(activeDownloads);
   activeDownloadsRef.current = activeDownloads;
+  // Guard for download queue processor to prevent concurrent pop
+  const isStartingTaskRef = useRef(false);
+
+  // Unmount cleanup for active WebSockets and download iframes
+  useEffect(() => {
+    return () => {
+      webSocketsRef.current.forEach((ws) => {
+        try { ws.close(); } catch {}
+      });
+      webSocketsRef.current.clear();
+      downloadIframesRef.current.forEach((iframe) => {
+        try {
+          if (document.body.contains(iframe)) {
+            document.body.removeChild(iframe);
+          }
+        } catch {}
+      });
+      downloadIframesRef.current.clear();
+    };
+  }, []);
 
   // Track Selector Modal State
   const [selectedCollection, setSelectedCollection] = useState<{ type: "albums" | "playlists"; item: any } | null>(null);
@@ -444,11 +466,16 @@ export default function Home() {
 
     const interval = setInterval(() => {
       const incomplete = activeDownloadsRef.current.filter(
-        (d) => !d.isComplete && !d.isError
+        (d) => !d.isComplete && !d.isError && !d.isQueued
       );
       if (incomplete.length === 0) return;
 
       incomplete.forEach(async (d) => {
+        // Skip HTTP polling if WebSocket is already managing this task
+        if (webSocketsRef.current.has(d.taskId)) {
+          return;
+        }
+
         try {
           const res = await getProgress(d.taskId);
 
@@ -534,12 +561,13 @@ export default function Home() {
             return;
           }
 
-          // Timeout fallback: if after 10s the entry still shows "Preparing..." with 0 progress,
+          // Timeout fallback: if after 15s (or 45s for album/playlist) the entry still shows "Preparing..." with 0 progress,
           // it likely completed too fast for polling to catch
+          const timeoutLimit = (d.itemType === "albums" || d.itemType === "playlists") ? 45000 : 15000;
           if (
             res.status === "not_found" &&
             !taskSeenActive.current.has(d.taskId) &&
-            Date.now() - d.createdAt > 10000
+            Date.now() - d.createdAt > timeoutLimit
           ) {
             updateDownload(d.taskId, {
               statusText: "Download failed or unavailable",
@@ -566,10 +594,13 @@ export default function Home() {
 
   // Auto-clear completed downloads after 2.5s and auto-close Transfer panel
   useEffect(() => {
+    // Only auto-clear if user enabled it in settings
+    if (settings.auto_close_transfers === false) return;
+
     const completed = activeDownloads.filter((d) => d.isComplete && !d.isError);
     if (completed.length === 0) return;
 
-    // Only auto-clear if there are no in-progress downloads left
+    // Only auto-clear if there are no in-progress or queued downloads left
     const inProgress = activeDownloads.filter((d) => !d.isComplete && !d.isError);
     if (inProgress.length > 0) return;
 
@@ -582,12 +613,12 @@ export default function Home() {
       });
       downloadWindowsRef.current.clear();
 
-      setActiveDownloads((prev) => prev.filter((d) => d.isError));
-      if (settings.auto_close_transfers !== false) {
-        const hasErrors = activeDownloads.some((d) => d.isError);
-        if (!hasErrors) {
-          setShowDownloads(false);
-        }
+      // Keep in-progress/queued tasks and errors; do not wipe tasks that started during the 2.5s window!
+      setActiveDownloads((prev) => prev.filter((d) => !d.isComplete || d.isError));
+      
+      const hasErrors = activeDownloads.some((d) => d.isError);
+      if (!hasErrors) {
+        setShowDownloads(false);
       }
     }, 2500);
     return () => clearTimeout(timer);
@@ -808,12 +839,14 @@ export default function Home() {
         iframe.style.display = "none";
         iframe.src = url;
         document.body.appendChild(iframe);
+        downloadIframesRef.current.set(d.taskId, iframe);
         setTimeout(() => {
           try {
             if (document.body.contains(iframe)) {
               document.body.removeChild(iframe);
             }
           } catch {}
+          downloadIframesRef.current.delete(d.taskId);
         }, 180000);
       }
       setupWebSocket(d.taskId);
@@ -833,18 +866,22 @@ export default function Home() {
       (d) => !d.isComplete && !d.isError && !d.isQueued
     ).length;
 
-    if (activeCount < 1) {
+    if (activeCount < 1 && !isStartingTaskRef.current) {
       const nextQueued = activeDownloads.find(
         (d) => !d.isComplete && !d.isError && d.isQueued
       );
 
       if (nextQueued) {
+        isStartingTaskRef.current = true;
         updateDownload(nextQueued.taskId, {
           isQueued: false,
           statusText: "Preparing...",
         });
         triggerDownloadExecution({ ...nextQueued, isQueued: false });
         toast.info(`Queue: Starting "${nextQueued.title}"`);
+        setTimeout(() => {
+          isStartingTaskRef.current = false;
+        }, 500);
       }
     }
   }, [activeDownloads, triggerDownloadExecution, updateDownload]);
@@ -877,6 +914,8 @@ export default function Home() {
     };
 
     setActiveDownloads((prev) => [...prev, newDownload]);
+    // Synchronously update activeDownloadsRef to avoid race conditions during batch/bulk loops
+    activeDownloadsRef.current = [...activeDownloadsRef.current, newDownload];
 
     if (shouldQueue) {
       toast.info(`Added to queue: "${itemTitle}"`);
@@ -897,6 +936,15 @@ export default function Home() {
     if (win && !win.closed) {
       try { win.close(); } catch {}
       downloadWindowsRef.current.delete(taskId);
+    }
+    const iframe = downloadIframesRef.current.get(taskId);
+    if (iframe) {
+      try {
+        if (document.body.contains(iframe)) {
+          document.body.removeChild(iframe);
+        }
+      } catch {}
+      downloadIframesRef.current.delete(taskId);
     }
 
     const target = activeDownloads.find((d) => d.taskId === taskId);
@@ -1033,9 +1081,9 @@ export default function Home() {
 
     // Summary toast
     if (failCount > 0) {
-      toast.warning(`Batch complete: ${successCount} downloaded, ${failCount} failed out of ${total}`);
+      toast.warning(`Batch: ${successCount} queued, ${failCount} failed out of ${total}`);
     } else if (total > 1) {
-      toast.success(`All ${total} tracks downloaded successfully!`);
+      toast.success(`Queued all ${total} tracks for download!`);
     }
   };
 
@@ -1247,11 +1295,11 @@ export default function Home() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
               className="w-9 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-white/[0.05] transition-colors shrink-0"
-              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              title={resolvedTheme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
             >
-              {theme === "dark" ? (
+              {resolvedTheme === "dark" ? (
                 <Sun className="w-4 h-4 text-amber-400" />
               ) : (
                 <Moon className="w-4 h-4 text-primary" />
@@ -1262,7 +1310,7 @@ export default function Home() {
       </aside>
 
       {/* ── Mobile Top Bar ── */}
-      <div className="fixed top-0 left-0 right-0 z-40 lg:hidden glass-strong border-b border-white/[0.06]">
+      <div className="fixed top-0 left-0 right-0 z-40 lg:hidden glass-strong border-b border-white/[0.06] pt-[env(safe-area-inset-top)]">
         <div className="flex items-center justify-between px-4 h-14">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 border border-primary/20 flex items-center justify-center">
@@ -1283,11 +1331,11 @@ export default function Home() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
               className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
-              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              title={resolvedTheme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
             >
-              {theme === "dark" ? (
+              {resolvedTheme === "dark" ? (
                 <Sun className="w-4 h-4 text-amber-400" />
               ) : (
                 <Moon className="w-4 h-4 text-primary" />
@@ -2276,8 +2324,14 @@ function PreviewPlayerBar({
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play();
-      setIsPlaying(true);
+      const p = audioRef.current.play();
+      if (p !== undefined) {
+        p.then(() => setIsPlaying(true))
+          .catch((err) => {
+            console.warn("Audio playback error:", err);
+            setIsPlaying(false);
+          });
+      }
     }
   };
 
@@ -2289,7 +2343,7 @@ function PreviewPlayerBar({
   };
 
   return (
-    <div className={`fixed left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-background/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-3 shadow-2xl flex items-center gap-3.5 ${showTransfers ? 'bottom-20' : 'bottom-4'}`}>
+    <div className={`fixed left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-background/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-3 shadow-2xl flex items-center gap-3.5 transition-all duration-300 ${showTransfers ? 'bottom-[72vh] md:bottom-20' : 'bottom-4'}`}>
       <audio
         ref={audioRef}
         onTimeUpdate={handleTimeUpdate}

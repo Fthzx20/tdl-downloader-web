@@ -1,6 +1,8 @@
 import os
 import uuid
 import asyncio
+import threading
+import urllib.parse
 from typing import Optional
 
 class R2StorageManager:
@@ -10,6 +12,7 @@ class R2StorageManager:
         self.config = config
         self._s3_client = None
         self._client_key = None
+        self._lock = threading.Lock()
 
     def is_configured(self) -> bool:
         return bool(
@@ -29,26 +32,27 @@ class R2StorageManager:
             self.config.r2_access_key_id.strip(),
             self.config.r2_secret_access_key.strip()
         )
-        if self._s3_client is not None and self._client_key == key:
+        with self._lock:
+            if self._s3_client is not None and self._client_key == key:
+                return self._s3_client
+
+            if self._s3_client is not None:
+                try:
+                    self._s3_client.close()
+                except Exception:
+                    pass
+
+            endpoint_url = f"https://{key[0]}.r2.cloudflarestorage.com"
+            self._s3_client = boto3.client(
+                "s3",
+                endpoint_url=endpoint_url,
+                aws_access_key_id=key[1],
+                aws_secret_access_key=key[2],
+                config=BotoConfig(signature_version="s3v4"),
+                region_name="auto"
+            )
+            self._client_key = key
             return self._s3_client
-
-        if self._s3_client is not None:
-            try:
-                self._s3_client.close()
-            except Exception:
-                pass
-
-        endpoint_url = f"https://{key[0]}.r2.cloudflarestorage.com"
-        self._s3_client = boto3.client(
-            "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=key[1],
-            aws_secret_access_key=key[2],
-            config=BotoConfig(signature_version="s3v4"),
-            region_name="auto"
-        )
-        self._client_key = key
-        return self._s3_client
 
     def _upload_and_presign_sync(self, local_file_path: str, object_name: Optional[str] = None, expires_in: int = 3600) -> str:
         if not os.path.exists(local_file_path):
@@ -64,6 +68,8 @@ class R2StorageManager:
         content_type = "application/octet-stream"
         if filename.endswith(".flac"):
             content_type = "audio/flac"
+        elif filename.endswith(".m4a"):
+            content_type = "audio/mp4"
         elif filename.endswith(".mp3"):
             content_type = "audio/mpeg"
         elif filename.endswith(".zip"):
@@ -79,6 +85,12 @@ class R2StorageManager:
             multipart_chunksize=4 * 1024 * 1024,
             use_threads=True
         )
+
+        # RFC 5987 safe filename encoding for Content-Disposition
+        ascii_filename = filename.encode('ascii', 'ignore').decode('ascii').replace('"', '') or "audio_download"
+        encoded_filename = urllib.parse.quote(filename)
+        content_disposition = f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
+
         client.upload_file(
             local_file_path,
             bucket,
@@ -86,14 +98,17 @@ class R2StorageManager:
             Config=transfer_config,
             ExtraArgs={
                 "ContentType": content_type,
-                "ContentDisposition": f'attachment; filename="{filename}"'
+                "ContentDisposition": content_disposition
             }
         )
 
         # Generate presigned download URL
         if self.config.r2_public_domain.strip():
             public_domain = self.config.r2_public_domain.strip().rstrip("/")
-            url = f"{public_domain}/{key}"
+            if not public_domain.startswith(("http://", "https://")):
+                public_domain = f"https://{public_domain}"
+            quoted_key = urllib.parse.quote(key, safe="/")
+            url = f"{public_domain}/{quoted_key}"
         else:
             url = client.generate_presigned_url(
                 "get_object",
@@ -108,6 +123,7 @@ class R2StorageManager:
             pass
 
         return url
+
 
     async def upload_and_get_url(self, local_file_path: str, object_name: Optional[str] = None, expires_in: int = 3600) -> str:
         """Asynchronously uploads a local file to R2, removes local file, and returns presigned download URL."""

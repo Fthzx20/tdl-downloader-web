@@ -48,35 +48,54 @@ class DownloadManager:
             await progress_callback(0, 1, "Fetching metadata...")
 
         # 1. Fetch Track & Album Metadata
-        track = await self.api.get_track(track_id)
+        track = await self.api.get_track(track_id) or {}
         album_info = track.get("album") or {}
         album_id = album_info.get("id")
         
         album = {}
         if album_id:
             try:
-                album = await self.api.get_album(album_id)
+                album = await self.api.get_album(album_id) or album_info
             except Exception:
                 album = album_info
         else:
             album = album_info
         
-        # Track details
-        title = track.get("title", "Untitled Track")
+        # Track details - defensive string and int casting against null API fields
+        title = str(track.get("title") or "Untitled Track")
         artist_obj = track.get("artist") or (track.get("artists", [{}])[0] if track.get("artists") else {})
-        artist_name = artist_obj.get("name", "Unknown Artist")
-        album_title = album.get("title", "Unknown Album")
-        track_num = track.get("trackNumber") or 1
-        total_tracks = album.get("numberOfTracks") or 1
-        disc_num = track.get("volumeNumber") or 1
-        total_discs = album.get("numberOfVolumes") or 1
-        release_date = album.get("releaseDate", "")
-        genre = album.get("genre", "")
+        if not isinstance(artist_obj, dict):
+            artist_obj = {}
+        artist_name = str(artist_obj.get("name") or "Unknown Artist")
+        album_title = str(album.get("title") or "Unknown Album")
+        
+        try:
+            track_num = int(track.get("trackNumber") or 1)
+        except (ValueError, TypeError):
+            track_num = 1
+        try:
+            total_tracks = int(album.get("numberOfTracks") or 1)
+        except (ValueError, TypeError):
+            total_tracks = 1
+        try:
+            disc_num = int(track.get("volumeNumber") or 1)
+        except (ValueError, TypeError):
+            disc_num = 1
+        try:
+            total_discs = int(album.get("numberOfVolumes") or 1)
+        except (ValueError, TypeError):
+            total_discs = 1
+            
+        release_date = str(album.get("releaseDate") or "")
+        genre = str(album.get("genre") or "")
         
         # Format the output paths
         safe_artist = sanitize_filename(artist_name)
         safe_album = sanitize_filename(album_title)
         safe_title = sanitize_filename(title)
+        
+        # Multi-disc track prefixing to prevent overwriting track 01 on disc 2
+        track_prefix = f"{disc_num}-{track_num:02d}" if total_discs > 1 else f"{track_num:02d}"
         
         if parent_folder:
             safe_parent = sanitize_filename(parent_folder)
@@ -87,8 +106,8 @@ class DownloadManager:
         os.makedirs(album_dir, exist_ok=True)
         
         # Smart Skip
-        flac_path = os.path.join(album_dir, f"{track_num:02d} - {safe_title}.flac")
-        m4a_path = os.path.join(album_dir, f"{track_num:02d} - {safe_title}.m4a")
+        flac_path = os.path.join(album_dir, f"{track_prefix} - {safe_title}.flac")
+        m4a_path = os.path.join(album_dir, f"{track_prefix} - {safe_title}.m4a")
         if os.path.exists(flac_path) and os.path.getsize(flac_path) > 0:
             if progress_callback:
                 await progress_callback(1, 1, "Skipped (Already Downloaded)")
@@ -105,7 +124,7 @@ class DownloadManager:
         try:
             lyrics_data = await self.api.get_track_lyrics(track_id)
             if lyrics_data:
-                lrc_path = os.path.join(album_dir, f"{track_num:02d} - {safe_title}.lrc")
+                lrc_path = os.path.join(album_dir, f"{track_prefix} - {safe_title}.lrc")
                 if lyrics_data.get("subtitles"):
                     lyrics_text = lyrics_data["subtitles"]
                 elif lyrics_data.get("lyrics"):
@@ -127,7 +146,7 @@ class DownloadManager:
             raise Exception(f'"{title}" by {artist_name} is unavailable or region-restricted on Tidal.')
         ext = stream_info["extension"]
         
-        filename = f"{track_num:02d} - {safe_title}.{ext}"
+        filename = f"{track_prefix} - {safe_title}.{ext}"
         final_path = os.path.join(album_dir, filename)
         temp_path = final_path + ".tmp"
         remux_path = final_path + f".remux.{ext}"
@@ -297,9 +316,14 @@ class DownloadManager:
                 
                 try:
                     _, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
                     stderr = b"FFmpeg remux timed out after 45s"
 
                 if proc.returncode != 0 or not os.path.exists(remux_path) or os.path.getsize(remux_path) == 0:
@@ -334,8 +358,8 @@ class DownloadManager:
                 await progress_callback(100, 100, "Applying metadata tags...")
                 
             cover_bytes = None
-            cover_id = album.get("cover") or track.get("album", {}).get("cover") or track.get("cover")
-            if cover_id:
+            cover_id = album.get("cover") or (track.get("album") or {}).get("cover") or track.get("cover")
+            if cover_id and isinstance(cover_id, str):
                 # Retrieve album artwork
                 cover_url = f"https://resources.tidal.com/images/{cover_id.replace('-', '/')}/1280x1280.jpg"
                 try:
@@ -365,8 +389,8 @@ class DownloadManager:
                 await progress_callback(1, 1, "Completed")
             return final_path
             
-        except Exception as e:
-            # Clean up all temp files and remux files on failure
+        except (Exception, asyncio.CancelledError) as e:
+            # Clean up all temp files and remux files on failure or cancellation
             for p in (temp_path, final_path + f".remux.{ext}", final_path + ".clean.tmp", final_path):
                 if os.path.exists(p):
                     try:
@@ -387,18 +411,18 @@ class DownloadManager:
                     print(f"Mutagen FLAC open error on {filepath}: {e}")
                     raise Exception(f"File validation failed: cannot parse FLAC stream ({e})")
 
-                audio["title"] = tags["title"]
-                audio["artist"] = tags["artist"]
-                audio["album"] = tags["album"]
-                audio["tracknumber"] = str(tags["track_num"])
-                audio["totaltracks"] = str(tags["total_tracks"])
-                audio["discnumber"] = str(tags["disc_num"])
-                audio["totaldiscs"] = str(tags.get("total_discs", 1))
-                audio["disctotal"] = str(tags.get("total_discs", 1))
+                audio["title"] = str(tags.get("title") or "Untitled Track")
+                audio["artist"] = str(tags.get("artist") or "Unknown Artist")
+                audio["album"] = str(tags.get("album") or "Unknown Album")
+                audio["tracknumber"] = str(tags.get("track_num") or 1)
+                audio["totaltracks"] = str(tags.get("total_tracks") or 1)
+                audio["discnumber"] = str(tags.get("disc_num") or 1)
+                audio["totaldiscs"] = str(tags.get("total_discs") or 1)
+                audio["disctotal"] = str(tags.get("total_discs") or 1)
                 if tags.get("date"):
-                    audio["date"] = tags["date"]
+                    audio["date"] = str(tags["date"])
                 if tags.get("genre"):
-                    audio["genre"] = tags["genre"]
+                    audio["genre"] = str(tags["genre"])
                 
                 if cover_bytes:
                     try:
@@ -425,15 +449,27 @@ class DownloadManager:
                     print(f"Mutagen MP4 open error on {filepath}: {e}")
                     raise Exception(f"File validation failed: cannot parse MP4/M4A stream ({e})")
 
-                audio["\xa9nam"] = tags["title"]
-                audio["\xa9ART"] = tags["artist"]
-                audio["\xa9alb"] = tags["album"]
-                audio["trkn"] = [(tags["track_num"], tags["total_tracks"])]
-                audio["disk"] = [(tags["disc_num"], tags.get("total_discs", 1))]
+                audio["\xa9nam"] = str(tags.get("title") or "Untitled Track")
+                audio["\xa9ART"] = str(tags.get("artist") or "Unknown Artist")
+                audio["\xa9alb"] = str(tags.get("album") or "Unknown Album")
+                try:
+                    t_num = int(tags.get("track_num") or 1)
+                    t_tot = int(tags.get("total_tracks") or 1)
+                    audio["trkn"] = [(t_num, t_tot)]
+                except Exception:
+                    audio["trkn"] = [(1, 1)]
+
+                try:
+                    d_num = int(tags.get("disc_num") or 1)
+                    d_tot = int(tags.get("total_discs") or 1)
+                    audio["disk"] = [(d_num, d_tot)]
+                except Exception:
+                    audio["disk"] = [(1, 1)]
+
                 if tags.get("date"):
-                    audio["\xa9day"] = tags["date"]
+                    audio["\xa9day"] = str(tags["date"])
                 if tags.get("genre"):
-                    audio["\xa9gen"] = tags["genre"]
+                    audio["\xa9gen"] = str(tags["genre"])
                 
                 if cover_bytes:
                     try:

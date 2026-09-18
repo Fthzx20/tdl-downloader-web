@@ -21,6 +21,9 @@ class TidalAPI:
         self.session = None
         self.country_code = "US"  # Default fallback
         self._refresh_lock = asyncio.Lock()
+        self._last_refresh_time = 0.0
+        self._pkce_code_verifier = None
+        self._pkce_client_unique_key = None
 
     async def get_session(self):
         """Lazy-loaded aiohttp client session."""
@@ -61,8 +64,21 @@ class TidalAPI:
 
         try:
             async with session.request(method, url, headers=headers, params=request_params, json=json_data) as resp:
+                # Handle 429 Rate Limiting
+                if resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    try:
+                        wait_time = min(float(retry_after), 10.0) if retry_after else 2.0
+                    except (ValueError, TypeError):
+                        wait_time = 2.0
+                    print(f"Rate limited by Tidal API (429). Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                    if retry_auth:
+                        return await self._api_request(method, endpoint, params=params, json_data=json_data, retry_auth=False)
+                    raise HTTPException(status_code=429, detail="Tidal API rate limit exceeded. Please try again later.")
+
                 # If we get 401 and we haven't recently refreshed the token (within the last 2 minutes)
-                recent_refresh = self.config.token_expiry > 0 and (time.time() < (self.config.token_expiry - 604680))
+                recent_refresh = (time.time() - self._last_refresh_time) < 120
                 if resp.status == 401 and retry_auth and self.config.refresh_token and not recent_refresh:
                     # Token might have expired early or been revoked; attempt refresh once
                     print("Received 401. Attempting manual token refresh and retry...")
@@ -151,6 +167,7 @@ class TidalAPI:
                 self.config.access_token = resp_json["access_token"]
                 self.config.refresh_token = resp_json.get("refresh_token", "")
                 self.config.token_expiry = time.time() + float(resp_json.get("expires_in", 604800))
+                self._last_refresh_time = time.time()
                 await self.fetch_session_info()
                 self.config.save()
                 return True
@@ -192,8 +209,9 @@ class TidalAPI:
                     self.config.access_token = resp_json["access_token"]
                     self.config.refresh_token = resp_json.get("refresh_token", self.config.refresh_token)
                     self.config.token_expiry = time.time() + float(resp_json.get("expires_in", 604800))
-                    self.config.save()
+                    self._last_refresh_time = time.time()
                     await self.fetch_session_info()
+                    self.config.save()
                     return True
                 else:
                     err_code = resp_json.get("error", "")
@@ -329,7 +347,7 @@ class TidalAPI:
 
     # --- Stream manifest parser ---
 
-    async def get_stream_info(self, track_id, quality):
+    async def get_stream_info(self, track_id, quality, allow_fallback=True):
         """Fetches and decodes the stream manifest for a track at target quality with quality fallback."""
         target_quality = "HI_RES_LOSSLESS" if quality == "MAX" else quality
         params = {
@@ -340,19 +358,24 @@ class TidalAPI:
         
         try:
             resp = await self._api_request("GET", f"tracks/{track_id}/playbackinfopostpaywall", params=params)
+        except HTTPException:
+            # Re-raise auth or rate-limit HTTPExceptions directly without masking
+            raise
         except Exception as e:
-            fallback_map = {
-                "MAX": ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH", "LOW"],
-                "HI_RES_LOSSLESS": ["HI_RES", "LOSSLESS", "HIGH", "LOW"],
-                "HI_RES": ["LOSSLESS", "HIGH", "LOW"],
-                "LOSSLESS": ["HIGH", "LOW"],
-                "HIGH": ["LOW"]
-            }
-            if quality in fallback_map:
-                for alt_q in fallback_map[quality]:
+            if allow_fallback:
+                fallback_map = {
+                    "MAX": ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH", "LOW"],
+                    "HI_RES_LOSSLESS": ["HI_RES", "LOSSLESS", "HIGH", "LOW"],
+                    "HI_RES": ["LOSSLESS", "HIGH", "LOW"],
+                    "LOSSLESS": ["HIGH", "LOW"],
+                    "HIGH": ["LOW"]
+                }
+                for alt_q in fallback_map.get(quality, []):
                     try:
                         print(f"Track {track_id} failed at {quality}. Retrying fallback quality {alt_q}...")
-                        return await self.get_stream_info(track_id, alt_q)
+                        return await self.get_stream_info(track_id, alt_q, allow_fallback=False)
+                    except HTTPException:
+                        raise
                     except Exception:
                         continue
             raise Exception(f"Track {track_id} is unavailable or region-restricted on Tidal ({e})")
@@ -396,7 +419,7 @@ class TidalAPI:
             elif "ec-3" in codec or "ac-4" in codec:
                 if not getattr(self.config, "allow_dolby_atmos", False):
                     print("Dolby Atmos detected but disallowed by settings. Falling back to LOSSLESS stereo FLAC.")
-                    return await self.get_stream_info(track_id, "LOSSLESS")
+                    return await self.get_stream_info(track_id, "LOSSLESS", allow_fallback=False)
                 ext = "m4a"
                 
             return {
