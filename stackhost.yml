@@ -1,8 +1,19 @@
 ﻿# StackHost Deployment Configuration
 # Documentation: https://stackhost.org/docs
-runtime: python
-version: "3.11"
+name: tdl-downloader-api
+
+runtime:
+  name: python
+  type: python
+  language: python
+  version: "3.11"
+
+build: "pip install --no-cache-dir -r requirements.txt"
+start: "python main.py"
+
 commands:
   build:
     - "pip install --no-cache-dir -r requirements.txt"
   start: "python main.py"
+
+port: 8000
