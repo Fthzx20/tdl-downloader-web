@@ -1897,7 +1897,10 @@ function PreviewPlayerBar({
       audioRef.current
         .play()
         .then(() => setIsPlaying(true))
-        .catch(() => setIsPlaying(false));
+        .catch((err) => {
+          console.warn("Autoplay was prevented or playback delayed:", err);
+          setIsPlaying(false);
+        });
     }
   }, [preview]);
 
@@ -1927,6 +1930,11 @@ function PreviewPlayerBar({
         ref={audioRef}
         onTimeUpdate={handleTimeUpdate}
         onEnded={() => setIsPlaying(false)}
+        onError={(e) => {
+          console.error("Preview playback error:", e);
+          setIsPlaying(false);
+          toast.error("Could not play preview audio");
+        }}
       />
       <div className="w-10 h-10 rounded-lg overflow-hidden bg-white/5 shrink-0 border border-white/10 flex items-center justify-center">
         {preview.coverUrl ? (

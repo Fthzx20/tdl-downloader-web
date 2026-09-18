@@ -102,10 +102,18 @@ export async function clearServerCache() {
   return res.json();
 }
 
-export async function getPreviewUrl(trackId: string) {
+export async function getPreviewUrl(trackId: string): Promise<{ status: string; preview_url: string }> {
   const res = await fetch(`${API_BASE}/preview/${trackId}`);
-  if (!res.ok) throw new Error("Failed to fetch preview URL");
-  return res.json();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to fetch preview" }));
+    throw new Error(err.detail || "Failed to fetch preview URL");
+  }
+  const data = await res.json();
+  let url = data.preview_url;
+  if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
+    url = `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
+  }
+  return { ...data, preview_url: url };
 }
 
 export async function resolveBatchLinks(urls: string[]) {

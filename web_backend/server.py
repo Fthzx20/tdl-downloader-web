@@ -10,7 +10,7 @@ import urllib.parse
 import aiohttp
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -667,26 +667,125 @@ async def get_playlist_tracks_endpoint(playlist_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_preview_cache: dict[str, tuple[bytes, str]] = {}
+_MAX_PREVIEW_CACHE = 30
+
+
+async def fetch_preview_audio(track_id: str) -> tuple[bytes, str]:
+    """Fetches and buffers a 30s audio preview for a track in memory."""
+    if track_id in _preview_cache:
+        return _preview_cache[track_id]
+
+    info = await api.get_stream_info(track_id, "LOW")
+    stream_type = info.get("type")
+
+    if stream_type == "dash":
+        init_url = info.get("init_url")
+        # In Tidal's DASH manifest, each segment is ~4s. 8 segments = ~32s preview (~380 KB)
+        segment_urls = info.get("segment_urls", [])[:8]
+        if not segment_urls and not init_url:
+            raise Exception("No audio segments found for preview.")
+
+        urls_to_fetch = []
+        if init_url:
+            urls_to_fetch.append(init_url)
+        urls_to_fetch.extend(segment_urls)
+
+        async with aiohttp.ClientSession() as session:
+            async def _fetch(u: str) -> bytes:
+                if not u:
+                    return b""
+                async with session.get(u, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    r.raise_for_status()
+                    return await r.read()
+
+            results = await asyncio.gather(*[_fetch(u) for u in urls_to_fetch])
+            combined = b"".join(results)
+            media_type = "audio/mp4"
+
+            if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
+                oldest = next(iter(_preview_cache))
+                _preview_cache.pop(oldest, None)
+            _preview_cache[track_id] = (combined, media_type)
+            return combined, media_type
+
+    elif stream_type == "direct":
+        url = info.get("url")
+        if not url:
+            raise Exception("No stream URL found for preview.")
+        ext = info.get("extension", "m4a")
+        media_type = "audio/flac" if ext == "flac" else "audio/mp4"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                r.raise_for_status()
+                # Read up to 1.5MB for preview
+                content = await r.content.read(1500 * 1024)
+                if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
+                    oldest = next(iter(_preview_cache))
+                    _preview_cache.pop(oldest, None)
+                _preview_cache[track_id] = (content, media_type)
+                return content, media_type
+    else:
+        raise Exception(f"Unsupported stream type: {stream_type}")
+
+
 @app.get("/preview/{track_id}")
 async def get_preview_endpoint(track_id: str):
-    """Gets audio stream preview URL for 30s playback."""
+    """Pre-caches and validates audio stream preview URL for 30s playback."""
     require_auth()
     try:
-        info = await api.get_stream_info(track_id, "LOW")
-        url = info.get("url")
-        if not url and info.get("type") == "dash":
-            segment_urls = info.get("segment_urls", [])
-            if segment_urls:
-                url = segment_urls[0]
-            else:
-                url = info.get("init_url")
-
-        if not url:
-            raise Exception("No preview stream URL available.")
-        return {"status": "success", "preview_url": url}
+        # Pre-fetch preview so browser playback starts instantly with 0 latency
+        await fetch_preview_audio(track_id)
+        return {
+            "status": "success",
+            "preview_url": f"/preview/{track_id}/audio.m4a"
+        }
     except Exception as e:
         print(f"Preview error for track {track_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/preview/{track_id}/audio.m4a")
+async def get_preview_audio_stream(track_id: str, request: Request):
+    """Serves 30s audio stream with Range header support for browser <audio> players."""
+    require_auth()
+    try:
+        audio_data, media_type = await fetch_preview_audio(track_id)
+    except Exception as e:
+        print(f"Preview audio error for track {track_id}: {e}")
+        raise HTTPException(status_code=404, detail=f"Preview unavailable: {e}")
+
+    total_len = len(audio_data)
+    range_header = request.headers.get("range")
+
+    if range_header and range_header.startswith("bytes="):
+        try:
+            parts = range_header.replace("bytes=", "").split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else total_len - 1
+            start = max(0, min(start, total_len - 1))
+            end = max(start, min(end, total_len - 1))
+            chunk = audio_data[start : end + 1]
+            headers = {
+                "Content-Range": f"bytes {start}-{end}/{total_len}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(chunk)),
+                "Content-Type": media_type,
+                "Cache-Control": "public, max-age=86400",
+            }
+            return Response(content=chunk, status_code=206, headers=headers, media_type=media_type)
+        except Exception:
+            pass
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(total_len),
+        "Content-Type": media_type,
+        "Cache-Control": "public, max-age=86400",
+    }
+    return Response(content=audio_data, status_code=200, headers=headers, media_type=media_type)
+
 
 
 class BatchResolveRequest(BaseModel):
