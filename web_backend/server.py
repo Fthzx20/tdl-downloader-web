@@ -1036,10 +1036,10 @@ def update_settings(req: SettingsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    raw_port = os.environ.get("PORT", "8000")
+    raw_port = os.environ.get("PORT", "3000")
     try:
         port = int(raw_port)
     except Exception:
-        port = 8000
+        port = 3000
     print(f"Starting Tidal Rip API on 0.0.0.0:{port}...", flush=True)
-    uvicorn.run("server:app", host="0.0.0.0", port=port, workers=1, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1, reload=False)

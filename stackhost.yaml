@@ -1,4 +1,4 @@
-﻿# StackHost Deployment Configuration
+# StackHost Deployment Configuration
 # Documentation: https://stackhost.org/docs
 runtime:
   image: python:3.11
@@ -8,6 +8,8 @@ commands:
   build:
     - "pip install --no-cache-dir -r requirements.txt"
   start: "python main.py"
+
+port: 3000
 
 repository:
   branch: main
