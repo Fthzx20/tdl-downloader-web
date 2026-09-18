@@ -10,8 +10,15 @@ from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
 
 def get_ffmpeg_binary():
-    """Finds available ffmpeg binary from PATH."""
-    return shutil.which("ffmpeg")
+    """Finds available ffmpeg binary from PATH or imageio_ffmpeg fallback."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
 
 
 def sanitize_filename(name):
@@ -123,39 +130,35 @@ class DownloadManager:
         filename = f"{track_num:02d} - {safe_title}.{ext}"
         final_path = os.path.join(album_dir, filename)
         temp_path = final_path + ".tmp"
+        remux_path = final_path + f".remux.{ext}"
         
+        # Clean stale temp files from previous runs to prevent corrupt data concatenation
+        for stale in (temp_path, remux_path, final_path + ".clean.tmp"):
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except Exception:
+                    pass
+
         # 3. Perform Download
         session = await self.api.get_session()
         try:
             if stream_info["type"] == "direct":
-                # Direct file download
+                # Direct file download (always from byte 0 to guarantee uncorrupted files)
                 url = stream_info["url"]
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
                         downloaded = 0
-                        if os.path.exists(temp_path):
-                            downloaded = os.path.getsize(temp_path)
-                            
-                        headers = {}
-                        if downloaded > 0:
-                            headers["Range"] = f"bytes={downloaded}-"
-                            
-                        async with session.get(url, headers=headers) as resp:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                             resp.raise_for_status()
-                            if resp.status == 206:
-                                mode = "ab"
-                                total_size = int(resp.headers.get("Content-Length", 0)) + downloaded
-                            else:
-                                downloaded = 0
-                                mode = "wb"
-                                total_size = int(resp.headers.get("Content-Length", 0))
+                            total_size = int(resp.headers.get("Content-Length", 0))
 
                             last_time = time.time()
-                            last_downloaded = downloaded
+                            last_downloaded = 0
                             smoothed_speed = None
                             
-                            async with aiofiles.open(temp_path, mode) as f:
+                            async with aiofiles.open(temp_path, "wb") as f:
                                 async for chunk in resp.content.iter_chunked(1024 * 64):
                                     is_paused = self.is_paused or (task_state and task_state.get("is_paused", False))
                                     is_cancelled = self.is_cancelled or (task_state and task_state.get("is_cancelled", False))
@@ -185,8 +188,7 @@ class DownloadManager:
                                             await progress_callback(downloaded, total_size, f"Downloading: {downloaded / 1024 / 1024:>5.1f}MB / {total_size / 1024 / 1024:>5.1f}MB       ({smoothed_speed / 1024 / 1024:>4.1f} MB/s)")
                         break # Exit retry loop on success
                     except Exception as e:
-                        # If 416 Range Not Satisfiable (e.g. previous download got full file but failed later), reset temp file
-                        if "416" in str(e) and os.path.exists(temp_path):
+                        if os.path.exists(temp_path):
                             try:
                                 os.remove(temp_path)
                             except Exception:
@@ -198,11 +200,10 @@ class DownloadManager:
                         await asyncio.sleep(2)
                                 
             elif stream_info["type"] == "dash":
-                # Fragmented DASH download with binary concatenation
+                # Fragmented DASH download with atomic segment writes
                 init_url = stream_info["init_url"]
                 segment_urls = stream_info["segment_urls"]
                 
-                # Estimate total size if possible
                 total_segments = len(segment_urls)
                 downloaded = 0
                 last_time = time.time()
@@ -214,9 +215,11 @@ class DownloadManager:
                     if init_url:
                         if progress_callback:
                             await progress_callback(0, total_segments, "Downloading initialization segment...")
-                        async with session.get(init_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        async with session.get(init_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                             resp.raise_for_status()
-                            await f.write(await resp.read())
+                            init_data = await resp.read()
+                            await f.write(init_data)
+                            downloaded += len(init_data)
                     
                     # Download each media segment in order
                     for idx, seg_url in enumerate(segment_urls):
@@ -232,87 +235,98 @@ class DownloadManager:
                             raise Exception("Cancelled by user")
                             
                         max_retries = 3
-                        seg_start_offset = await f.tell()
                         for attempt in range(max_retries):
                             try:
-                                if attempt > 0:
-                                    # Reset file to segment start on retry to avoid corruption
-                                    await f.seek(seg_start_offset)
-                                    await f.truncate()
                                 if progress_callback:
                                     if attempt > 0:
                                         await progress_callback(idx, total_segments, f"Retrying segment {idx + 1:02d}/{total_segments:02d}... ({attempt}/{max_retries})")
                                     else:
                                         await progress_callback(idx, total_segments, f"Downloading segment {idx + 1:02d}/{total_segments:02d}...")
                                         
-                                async with session.get(seg_url) as resp:
+                                async with session.get(seg_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                                     resp.raise_for_status()
-                                    async for chunk in resp.content.iter_chunked(1024 * 64):
-                                        await f.write(chunk)
-                                        downloaded += len(chunk)
-                                        
-                                        now = time.time()
-                                        if now - last_time >= 0.5:
-                                            current_speed = (downloaded - last_downloaded) / (now - last_time) # bytes/sec
-                                            if smoothed_speed is None:
-                                                smoothed_speed = current_speed
-                                            else:
-                                                smoothed_speed = 0.5 * smoothed_speed + 0.5 * current_speed
-                                                
-                                            last_time = now
-                                            last_downloaded = downloaded
-                                            if progress_callback:
-                                                await progress_callback(idx, total_segments, f"Downloading segment {idx + 1:02d}/{total_segments:02d}       ({smoothed_speed / 1024 / 1024:>4.1f} MB/s)")
+                                    # Atomic read: guarantees complete segment buffer before writing to disk
+                                    seg_data = await resp.read()
+                                    await f.write(seg_data)
+                                    downloaded += len(seg_data)
+                                    
+                                    now = time.time()
+                                    if now - last_time >= 0.5:
+                                        current_speed = (downloaded - last_downloaded) / (now - last_time) # bytes/sec
+                                        if smoothed_speed is None:
+                                            smoothed_speed = current_speed
+                                        else:
+                                            smoothed_speed = 0.5 * smoothed_speed + 0.5 * current_speed
+                                            
+                                        last_time = now
+                                        last_downloaded = downloaded
+                                        if progress_callback:
+                                            await progress_callback(idx, total_segments, f"Downloading segment {idx + 1:02d}/{total_segments:02d}       ({smoothed_speed / 1024 / 1024:>4.1f} MB/s)")
                                 break # Success
                             except Exception as e:
                                 if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled or attempt == max_retries - 1:
                                     raise e
                                 await asyncio.sleep(2)
                                 
-            # Convert/Extract container if needed for DASH streams
+            # Convert/Extract container for DASH streams using FFmpeg
             if stream_info["type"] == "dash":
                 if progress_callback:
                     await progress_callback(100, 100, "Processing audio container...")
                 
                 ffmpeg_exe = get_ffmpeg_binary()
-                if ffmpeg_exe:
-                    raw_out_path = final_path + ".clean.tmp"
+                if not ffmpeg_exe:
+                    raise Exception("FFmpeg is required to remux DASH audio streams, but no FFmpeg binary was found.")
+
+                remux_path = final_path + f".remux.{ext}"
+                if os.path.exists(remux_path):
                     try:
-                        if ext == "flac":
-                            cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-f", "flac", raw_out_path]
-                        else:
-                            cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-movflags", "+faststart", raw_out_path]
+                        os.remove(remux_path)
+                    except Exception:
+                        pass
 
-                        proc = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        
+                if ext == "flac":
+                    cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-f", "flac", remux_path]
+                else:
+                    cmd = [ffmpeg_exe, "-y", "-i", temp_path, "-c:a", "copy", "-f", "mp4", "-movflags", "+faststart", remux_path]
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                try:
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    stderr = b"FFmpeg remux timed out after 45s"
+
+                if proc.returncode != 0 or not os.path.exists(remux_path) or os.path.getsize(remux_path) == 0:
+                    err_msg = stderr.decode(errors="replace").strip().split('\n')[-1] if stderr else "Unknown error"
+                    if os.path.exists(remux_path):
                         try:
-                            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
-                        except asyncio.TimeoutError:
-                            proc.kill()
-                            await proc.wait()
-                            stderr = b"FFmpeg remux timed out after 45s"
+                            os.remove(remux_path)
+                        except Exception:
+                            pass
+                    raise Exception(f"FFmpeg remux failed ({err_msg}). Raw DASH stream cannot be saved as valid audio.")
 
-                        if proc.returncode == 0 and os.path.exists(raw_out_path) and os.path.getsize(raw_out_path) > 0:
-                            os.remove(temp_path)
-                            temp_path = raw_out_path
-                        else:
-                            err_msg = stderr.decode().strip().split('\n')[-1] if stderr else "Unknown error"
-                            print(f"FFmpeg remux warning: {err_msg}. Keeping original file.")
-                            if os.path.exists(raw_out_path):
-                                os.remove(raw_out_path)
-                    except Exception as e:
-                        print(f"FFmpeg processing failed: {e}")
+                # Remux successful: remove raw unremuxed temp file and replace temp_path pointer
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+                temp_path = remux_path
 
             if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled:
                 raise Exception("Cancelled by user before tagging")
                 
             # Rename temp file to final destination
             if os.path.exists(final_path):
-                os.remove(final_path)
+                try:
+                    os.remove(final_path)
+                except Exception:
+                    pass
             os.rename(temp_path, final_path)
             
             # 4. Embedded Metadata Tagging
@@ -352,9 +366,8 @@ class DownloadManager:
             return final_path
             
         except Exception as e:
-            # Clean up temp file and ffmpeg clean temp file on failure
-            clean_temp = final_path + ".clean.tmp"
-            for p in (temp_path, clean_temp):
+            # Clean up all temp files and remux files on failure
+            for p in (temp_path, final_path + f".remux.{ext}", final_path + ".clean.tmp", final_path):
                 if os.path.exists(p):
                     try:
                         os.remove(p)
@@ -372,7 +385,7 @@ class DownloadManager:
                     audio = FLAC(filepath)
                 except Exception as e:
                     print(f"Mutagen FLAC open error on {filepath}: {e}")
-                    return
+                    raise Exception(f"File validation failed: cannot parse FLAC stream ({e})")
 
                 audio["title"] = tags["title"]
                 audio["artist"] = tags["artist"]
@@ -410,7 +423,7 @@ class DownloadManager:
                     audio = MP4(filepath)
                 except Exception as e:
                     print(f"Mutagen MP4 open error on {filepath}: {e}")
-                    return
+                    raise Exception(f"File validation failed: cannot parse MP4/M4A stream ({e})")
 
                 audio["\xa9nam"] = tags["title"]
                 audio["\xa9ART"] = tags["artist"]
@@ -434,3 +447,4 @@ class DownloadManager:
                 audio.save()
         except Exception as e:
             print(f"apply_metadata error: {e}")
+            raise e
