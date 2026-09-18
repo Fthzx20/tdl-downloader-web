@@ -6,19 +6,12 @@ import aiofiles
 import asyncio
 import subprocess
 import time
-import imageio_ffmpeg
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
 
 def get_ffmpeg_binary():
-    """Finds available ffmpeg binary from PATH or imageio_ffmpeg."""
-    ffmpeg_path = shutil.which("ffmpeg")
-    if ffmpeg_path:
-        return ffmpeg_path
-    try:
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
+    """Finds available ffmpeg binary from PATH."""
+    return shutil.which("ffmpeg")
 
 
 def sanitize_filename(name):
@@ -69,6 +62,7 @@ class DownloadManager:
         track_num = track.get("trackNumber") or 1
         total_tracks = album.get("numberOfTracks") or 1
         disc_num = track.get("volumeNumber") or 1
+        total_discs = album.get("numberOfVolumes") or 1
         release_date = album.get("releaseDate", "")
         genre = album.get("genre", "")
         
@@ -191,6 +185,12 @@ class DownloadManager:
                                             await progress_callback(downloaded, total_size, f"Downloading: {downloaded / 1024 / 1024:>5.1f}MB / {total_size / 1024 / 1024:>5.1f}MB       ({smoothed_speed / 1024 / 1024:>4.1f} MB/s)")
                         break # Exit retry loop on success
                     except Exception as e:
+                        # If 416 Range Not Satisfiable (e.g. previous download got full file but failed later), reset temp file
+                        if "416" in str(e) and os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
                         if (task_state and task_state.get("is_cancelled", False)) or self.is_cancelled or attempt == max_retries - 1:
                             raise e
                         if progress_callback:
@@ -232,8 +232,13 @@ class DownloadManager:
                             raise Exception("Cancelled by user")
                             
                         max_retries = 3
+                        seg_start_offset = await f.tell()
                         for attempt in range(max_retries):
                             try:
+                                if attempt > 0:
+                                    # Reset file to segment start on retry to avoid corruption
+                                    await f.seek(seg_start_offset)
+                                    await f.truncate()
                                 if progress_callback:
                                     if attempt > 0:
                                         await progress_callback(idx, total_segments, f"Retrying segment {idx + 1:02d}/{total_segments:02d}... ({attempt}/{max_retries})")
@@ -280,15 +285,16 @@ class DownloadManager:
 
                         proc = await asyncio.create_subprocess_exec(
                             *cmd,
-                            stdout=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.PIPE
                         )
                         
                         try:
-                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+                            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
                         except asyncio.TimeoutError:
                             proc.kill()
-                            stdout, stderr = b"", b"FFmpeg remux timed out after 45s"
+                            await proc.wait()
+                            stderr = b"FFmpeg remux timed out after 45s"
 
                         if proc.returncode == 0 and os.path.exists(raw_out_path) and os.path.getsize(raw_out_path) > 0:
                             os.remove(temp_path)
@@ -333,6 +339,7 @@ class DownloadManager:
                 "track_num": track_num,
                 "total_tracks": total_tracks,
                 "disc_num": disc_num,
+                "total_discs": total_discs,
                 "date": release_date,
                 "genre": genre,
                 "cover_bytes": cover_bytes,
@@ -373,6 +380,8 @@ class DownloadManager:
                 audio["tracknumber"] = str(tags["track_num"])
                 audio["totaltracks"] = str(tags["total_tracks"])
                 audio["discnumber"] = str(tags["disc_num"])
+                audio["totaldiscs"] = str(tags.get("total_discs", 1))
+                audio["disctotal"] = str(tags.get("total_discs", 1))
                 if tags.get("date"):
                     audio["date"] = tags["date"]
                 if tags.get("genre"):
@@ -407,7 +416,7 @@ class DownloadManager:
                 audio["\xa9ART"] = tags["artist"]
                 audio["\xa9alb"] = tags["album"]
                 audio["trkn"] = [(tags["track_num"], tags["total_tracks"])]
-                audio["disk"] = [(tags["disc_num"], 1)]
+                audio["disk"] = [(tags["disc_num"], tags.get("total_discs", 1))]
                 if tags.get("date"):
                     audio["\xa9day"] = tags["date"]
                 if tags.get("genre"):

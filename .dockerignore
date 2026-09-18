@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+web_frontend/node_modules/
+
+# Next.js Build Output
+web_frontend/.next/
+web_frontend/out/
+web_frontend/build/
+
+# Python Cache & Environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+testenv/
+
+# Secrets & Local Config
+config.json
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Git & System
+.git/
+.gitignore
+.DS_Store
+Thumbs.db
+*.log
+
+# Temp & Build Artifacts
+scratch/
+*.zip
+*.tmp
+
+# Documentation & Non-runtime
+README.md
+DEPLOY_*.md
+LICENSE
+*.md

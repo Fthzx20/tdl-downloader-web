@@ -200,7 +200,7 @@ function exportPlaylistM3U(items: any[], filename = "tdl_playlist.m3u") {
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
   toast.success(`Exported ${items.length} item(s) to ${filename}`);
 }
 
@@ -252,6 +252,9 @@ export default function Home() {
   const taskSeenActive = useRef<Set<string>>(new Set());
   // Tracks any download popup windows to automatically close them when download completes
   const downloadWindowsRef = useRef<Map<string, Window>>(new Map());
+  // Ref tracking latest activeDownloads to prevent polling interval churn
+  const activeDownloadsRef = useRef<ActiveDownload[]>(activeDownloads);
+  activeDownloadsRef.current = activeDownloads;
 
   // Track Selector Modal State
   const [selectedCollection, setSelectedCollection] = useState<{ type: "albums" | "playlists"; item: any } | null>(null);
@@ -355,7 +358,7 @@ export default function Home() {
       }
       toast.success(`Found ${items.length} downloadable item(s)! Queueing downloads...`);
       for (const entry of items) {
-        handleDownload(entry.item);
+        handleDownload(entry.item, entry.type);
       }
     } catch (e: any) {
       toast.error("Failed to process batch links");
@@ -423,13 +426,19 @@ export default function Home() {
   }, [query, type]);
 
   // Polling for server-side progress & live download speed
+  const hasIncompleteDownloads = activeDownloads.some(
+    (d) => !d.isComplete && !d.isError
+  );
+
   useEffect(() => {
-    const incomplete = activeDownloads.filter(
-      (d) => !d.isComplete && !d.isError
-    );
-    if (incomplete.length === 0) return;
+    if (!hasIncompleteDownloads) return;
 
     const interval = setInterval(() => {
+      const incomplete = activeDownloadsRef.current.filter(
+        (d) => !d.isComplete && !d.isError
+      );
+      if (incomplete.length === 0) return;
+
       incomplete.forEach(async (d) => {
         try {
           const res = await getProgress(d.taskId);
@@ -524,9 +533,10 @@ export default function Home() {
             Date.now() - d.createdAt > 10000
           ) {
             updateDownload(d.taskId, {
-              statusText: "Downloaded ✓",
-              progress: 100,
+              statusText: "Download failed or unavailable",
+              progress: 0,
               isComplete: true,
+              isError: true,
             });
 
             // Auto-close any opened download window
@@ -543,7 +553,7 @@ export default function Home() {
       });
     }, 1500);
     return () => clearInterval(interval);
-  }, [activeDownloads]);
+  }, [hasIncompleteDownloads]);
 
   // Auto-clear completed downloads after 2.5s and auto-close Transfer panel
   useEffect(() => {
@@ -745,6 +755,7 @@ export default function Home() {
   };
 
   const handleCancelDownload = (taskId: string) => {
+    taskSeenActive.current.delete(taskId);
     const win = downloadWindowsRef.current.get(taskId);
     if (win && !win.closed) {
       try { win.close(); } catch {}
@@ -777,7 +788,15 @@ export default function Home() {
   };
 
   const clearCompletedDownloads = () => {
-    setActiveDownloads((prev) => prev.filter((d) => !d.isComplete));
+    setActiveDownloads((prev) => {
+      prev.forEach((d) => {
+        if (d.isComplete) {
+          taskSeenActive.current.delete(d.taskId);
+          downloadWindowsRef.current.delete(d.taskId);
+        }
+      });
+      return prev.filter((d) => !d.isComplete);
+    });
     toast.success("Download history cleared");
   };
 
@@ -1594,6 +1613,7 @@ export default function Home() {
       <PreviewPlayerBar
         preview={previewTrack}
         onClose={() => setPreviewTrack(null)}
+        showTransfers={showDownloads}
       />
     </div>
   );
@@ -2037,9 +2057,11 @@ function BulkDownloadDialog({
 function PreviewPlayerBar({
   preview,
   onClose,
+  showTransfers,
 }: {
   preview: { trackId: string; url: string; title: string; artist: string; coverUrl?: string } | null;
   onClose: () => void;
+  showTransfers?: boolean;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -2056,6 +2078,12 @@ function PreviewPlayerBar({
           setIsPlaying(false);
         });
     }
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+      }
+    };
   }, [preview]);
 
   if (!preview) return null;
@@ -2079,7 +2107,7 @@ function PreviewPlayerBar({
   };
 
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-background/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-3 shadow-2xl flex items-center gap-3.5">
+    <div className={`fixed left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-background/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-3 shadow-2xl flex items-center gap-3.5 ${showTransfers ? 'bottom-20' : 'bottom-4'}`}>
       <audio
         ref={audioRef}
         onTimeUpdate={handleTimeUpdate}

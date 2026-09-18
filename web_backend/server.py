@@ -42,6 +42,8 @@ try:
 except Exception:
     TEMP_DIR = tempfile.gettempdir()
 
+DOWNLOAD_SEM = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
+
 
 def require_auth():
     """Raises 401 if not authenticated."""
@@ -166,6 +168,16 @@ async def resolve_external_link(url: str):
     return None, None, None
 
 
+def trim_memory():
+    """Forces garbage collection and releases glibc arena memory back to OS (essential for 256MB container)."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def cleanup_file(path: str):
     """Background task to remove a file/zip after sending it."""
     try:
@@ -174,7 +186,7 @@ def cleanup_file(path: str):
     except Exception as e:
         print(f"Failed to cleanup {path}: {e}")
     finally:
-        gc.collect()
+        trim_memory()
 
 
 def cleanup_dir(path: str):
@@ -185,7 +197,7 @@ def cleanup_dir(path: str):
     except Exception as e:
         print(f"Failed to cleanup {path}: {e}")
     finally:
-        gc.collect()
+        trim_memory()
 
 
 def purge_stale_temp_cache(max_age_seconds: int = 900):
@@ -215,15 +227,46 @@ def purge_stale_temp_cache(max_age_seconds: int = 900):
                                 os.remove(fpath)
                         except Exception:
                             pass
-        gc.collect()
+        trim_memory()
     except Exception as e:
         print(f"Error purging stale cache: {e}")
+
+
+async def _periodic_cleanup_loop():
+    """Periodically cleans stale active/completed tasks, purges old temporary files, and trims RAM."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = time.time()
+            # Prune completed tasks older than 2 minutes
+            stale_completed = [tid for tid, ts in list(completed_tasks.items()) if now - ts > 120]
+            for tid in stale_completed:
+                completed_tasks.pop(tid, None)
+                active_tasks.pop(tid, None)
+
+            # Prune active tasks inactive for > 10 minutes (600s)
+            expired = [
+                tid for tid, tracks in list(active_tasks.items())
+                if tracks and all(now - t.get("time", 0) > 600 for t in tracks.values())
+            ]
+            for tid in expired:
+                active_tasks.pop(tid, None)
+
+            # Purge temp cache files older than 15 minutes
+            purge_stale_temp_cache(max_age_seconds=900)
+            trim_memory()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Periodic background cleanup error: {e}")
 
 
 @app.on_event("startup")
 async def startup_event():
     # Purge any old leftover temp files on startup
     purge_stale_temp_cache(max_age_seconds=300)
+    # Start periodic background cleanup loop
+    asyncio.create_task(_periodic_cleanup_loop())
     # If token exists, verify session
     if config.access_token:
         try:
@@ -233,11 +276,20 @@ async def startup_event():
             pass
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully closes aiohttp connections during server reload/shutdown."""
+    try:
+        await api.close()
+    except Exception:
+        pass
+
+
 @app.post("/system/clear_cache")
 def clear_cache_endpoint():
     """Manually purges temporary files, zip archives, and cached temp files."""
     purge_stale_temp_cache(max_age_seconds=0) # Clear all immediately
-    gc.collect()
+    trim_memory()
     return {"status": "success", "message": "Server temporary cache cleared."}
 
 
@@ -411,13 +463,13 @@ def get_progress(task_id: str):
         completed_tasks.pop(tid, None)
         active_tasks.pop(tid, None)
 
-    # Clean up old tasks inactive for > 10 minutes (600s) or empty tasks to prevent memory leak
+    # Clean up old tasks inactive for > 10 minutes (600s)
     expired = [
         tid for tid, tracks in list(active_tasks.items())
-        if not tracks or all(now - t.get("time", 0) > 600 for t in tracks.values())
+        if tracks and all(now - t.get("time", 0) > 600 for t in tracks.values())
     ]
     for tid in expired:
-        del active_tasks[tid]
+        active_tasks.pop(tid, None)
 
     # Check if task was explicitly marked as complete
     if task_id in completed_tasks:
@@ -442,6 +494,16 @@ def cleanup_empty_dir(path: str):
                     os.rmdir(parent)
     except Exception:
         pass
+
+
+def _create_zip_archive(zip_path: str, source_dir: str):
+    """Creates a ZIP archive from a directory (runs in thread pool)."""
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
+        for root_dir, dirs, files in os.walk(source_dir):
+            for file in files:
+                file_path = os.path.join(root_dir, file)
+                arcname = os.path.relpath(file_path, source_dir)
+                zipf.write(file_path, arcname)
 
 
 async def serve_or_upload_r2(local_path: str, background_tasks: BackgroundTasks, cleanup_paths: list = None):
@@ -518,7 +580,7 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         if not items:
             raise Exception("No tracks found on this album.")
             
-        sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
+        sem = DOWNLOAD_SEM
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
@@ -554,17 +616,12 @@ async def download_album(album_id: str, background_tasks: BackgroundTasks, task_
         
         # Update progress to indicate zipping stage
         if task_id and task_id in active_tasks:
-            for tid_key in active_tasks[task_id]:
+            for tid_key in list(active_tasks[task_id].keys()):
                 active_tasks[task_id][tid_key]["status"] = "Creating ZIP archive..."
 
         uid_tag = task_id if task_id else str(int(time.time() * 1000))
         zip_path = os.path.join(TEMP_DIR, f"{safe_album}_{uid_tag}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
-            for root_dir, dirs, files in os.walk(album_dir):
-                for file in files:
-                    file_path = os.path.join(root_dir, file)
-                    arcname = os.path.relpath(file_path, album_dir)
-                    zipf.write(file_path, arcname)
+        await asyncio.to_thread(_create_zip_archive, zip_path, album_dir)
                     
         mark_task_complete(task_id)
         return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[album_dir])
@@ -589,7 +646,7 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         if not items:
             raise Exception("No tracks found in this playlist.")
             
-        sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
+        sem = DOWNLOAD_SEM
         async def sem_download(tid, parent, cb):
             async with sem:
                 try:
@@ -625,17 +682,12 @@ async def download_playlist(playlist_id: str, background_tasks: BackgroundTasks,
         
         # Update progress to indicate zipping stage
         if task_id and task_id in active_tasks:
-            for tid_key in active_tasks[task_id]:
+            for tid_key in list(active_tasks[task_id].keys()):
                 active_tasks[task_id][tid_key]["status"] = "Creating ZIP archive..."
 
         uid_tag = task_id if task_id else str(int(time.time() * 1000))
         zip_path = os.path.join(TEMP_DIR, f"{safe_playlist}_{uid_tag}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
-            for root_dir, dirs, files in os.walk(playlist_dir):
-                for file in files:
-                    file_path = os.path.join(root_dir, file)
-                    arcname = os.path.relpath(file_path, playlist_dir)
-                    zipf.write(file_path, arcname)
+        await asyncio.to_thread(_create_zip_archive, zip_path, playlist_dir)
                     
         mark_task_complete(task_id)
         return await serve_or_upload_r2(zip_path, background_tasks, cleanup_paths=[playlist_dir])
@@ -668,7 +720,7 @@ async def get_playlist_tracks_endpoint(playlist_id: str):
 
 
 _preview_cache: dict[str, tuple[bytes, str]] = {}
-_MAX_PREVIEW_CACHE = 30
+_MAX_PREVIEW_CACHE = 10
 
 
 async def fetch_preview_audio(track_id: str) -> tuple[bytes, str]:
@@ -691,23 +743,23 @@ async def fetch_preview_audio(track_id: str) -> tuple[bytes, str]:
             urls_to_fetch.append(init_url)
         urls_to_fetch.extend(segment_urls)
 
-        async with aiohttp.ClientSession() as session:
-            async def _fetch(u: str) -> bytes:
-                if not u:
-                    return b""
-                async with session.get(u, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    r.raise_for_status()
-                    return await r.read()
+        session = await api.get_session()
+        async def _fetch(u: str) -> bytes:
+            if not u:
+                return b""
+            async with session.get(u, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                r.raise_for_status()
+                return await r.read()
 
-            results = await asyncio.gather(*[_fetch(u) for u in urls_to_fetch])
-            combined = b"".join(results)
-            media_type = "audio/mp4"
+        results = await asyncio.gather(*[_fetch(u) for u in urls_to_fetch])
+        combined = b"".join(results)
+        media_type = "audio/mp4"
 
-            if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
-                oldest = next(iter(_preview_cache))
-                _preview_cache.pop(oldest, None)
-            _preview_cache[track_id] = (combined, media_type)
-            return combined, media_type
+        if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
+            oldest = next(iter(_preview_cache))
+            _preview_cache.pop(oldest, None)
+        _preview_cache[track_id] = (combined, media_type)
+        return combined, media_type
 
     elif stream_type == "direct":
         url = info.get("url")
@@ -716,16 +768,16 @@ async def fetch_preview_audio(track_id: str) -> tuple[bytes, str]:
         ext = info.get("extension", "m4a")
         media_type = "audio/flac" if ext == "flac" else "audio/mp4"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                r.raise_for_status()
-                # Read up to 1.5MB for preview
-                content = await r.content.read(1500 * 1024)
-                if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
-                    oldest = next(iter(_preview_cache))
-                    _preview_cache.pop(oldest, None)
-                _preview_cache[track_id] = (content, media_type)
-                return content, media_type
+        session = await api.get_session()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            r.raise_for_status()
+            # Read up to 1.5MB for preview
+            content = await r.content.read(1500 * 1024)
+            if len(_preview_cache) >= _MAX_PREVIEW_CACHE:
+                oldest = next(iter(_preview_cache))
+                _preview_cache.pop(oldest, None)
+            _preview_cache[track_id] = (content, media_type)
+            return content, media_type
     else:
         raise Exception(f"Unsupported stream type: {stream_type}")
 
@@ -762,8 +814,14 @@ async def get_preview_audio_stream(track_id: str, request: Request):
     if range_header and range_header.startswith("bytes="):
         try:
             parts = range_header.replace("bytes=", "").split("-")
-            start = int(parts[0]) if parts[0] else 0
-            end = int(parts[1]) if len(parts) > 1 and parts[1] else total_len - 1
+            if not parts[0] and len(parts) > 1 and parts[1]:
+                # Suffix range: bytes=-500 means last 500 bytes
+                suffix_len = int(parts[1])
+                start = max(0, total_len - suffix_len)
+                end = total_len - 1
+            else:
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if len(parts) > 1 and parts[1] else total_len - 1
             start = max(0, min(start, total_len - 1))
             end = max(start, min(end, total_len - 1))
             chunk = audio_data[start : end + 1]
@@ -795,28 +853,27 @@ class BatchResolveRequest(BaseModel):
 async def batch_resolve_endpoint(req: BatchResolveRequest):
     """Resolves multiple URLs (Tidal or cross-platform links) to items for batch download."""
     require_auth()
-    resolved_items = []
     
-    for raw_url in req.urls:
+    async def resolve_single(raw_url: str):
         u = raw_url.strip()
         if not u:
-            continue
+            return None
             
         url_type, url_id = parse_tidal_url(u)
         if url_type:
             try:
                 if url_type == "track":
                     item = await api.get_track(url_id)
-                    resolved_items.append({"type": "track", "item": item, "original_url": u})
+                    return {"type": "track", "item": item, "original_url": u}
                 elif url_type == "album":
                     item = await api.get_album(url_id)
-                    resolved_items.append({"type": "album", "item": item, "original_url": u})
+                    return {"type": "album", "item": item, "original_url": u}
                 elif url_type == "playlist":
                     item = await api.get_playlist(url_id)
-                    resolved_items.append({"type": "playlist", "item": item, "original_url": u})
+                    return {"type": "playlist", "item": item, "original_url": u}
             except Exception as e:
                 print(f"Error resolving Tidal link {u}: {e}")
-            continue
+            return None
 
         ext_type, ext_query, platform_name = await resolve_external_link(u)
         if ext_query:
@@ -826,15 +883,18 @@ async def batch_resolve_endpoint(req: BatchResolveRequest):
                 cat = res.get(target_type, {}) if isinstance(res.get(target_type), dict) else {}
                 items = cat.get("items", [])
                 if items:
-                    resolved_items.append({
+                    return {
                         "type": ext_type or "track",
                         "item": items[0],
                         "converted_from": platform_name,
                         "original_url": u
-                    })
+                    }
             except Exception as e:
                 print(f"Error resolving external link {u}: {e}")
-                
+        return None
+    
+    results = await asyncio.gather(*[resolve_single(u) for u in req.urls])
+    resolved_items = [r for r in results if r is not None]
     return {"resolved": resolved_items}
 
 
@@ -850,6 +910,7 @@ class SettingsRequest(BaseModel):
 
 @app.get("/settings")
 def get_settings():
+    require_auth()
     tier = config.quality_tier
     if tier == "HI_RES_LOSSLESS":
         tier = "MAX"
@@ -863,6 +924,7 @@ def get_settings():
 
 @app.post("/settings")
 def update_settings(req: SettingsRequest):
+    require_auth()
     if req.quality_tier:
         tier = req.quality_tier
         if tier == "MAX":

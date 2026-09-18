@@ -1,4 +1,5 @@
 import os
+import uuid
 import asyncio
 from typing import Optional
 
@@ -54,7 +55,7 @@ class R2StorageManager:
             raise FileNotFoundError(f"File not found for R2 upload: {local_file_path}")
 
         filename = os.path.basename(local_file_path)
-        key = object_name or f"temp_downloads/{filename}"
+        key = object_name or f"temp_downloads/{uuid.uuid4().hex}/{filename}"
 
         client = self._get_s3_client()
         bucket = self.config.r2_bucket_name.strip()
@@ -70,11 +71,19 @@ class R2StorageManager:
         elif filename.endswith(".lrc"):
             content_type = "text/plain; charset=utf-8"
 
-        # Upload to R2
+        # Upload to R2 with memory-optimized transfer config (2 threads, 4MB chunks)
+        from boto3.s3.transfer import TransferConfig
+        transfer_config = TransferConfig(
+            multipart_threshold=8 * 1024 * 1024,
+            max_concurrency=2,
+            multipart_chunksize=4 * 1024 * 1024,
+            use_threads=True
+        )
         client.upload_file(
             local_file_path,
             bucket,
             key,
+            Config=transfer_config,
             ExtraArgs={
                 "ContentType": content_type,
                 "ContentDisposition": f'attachment; filename="{filename}"'

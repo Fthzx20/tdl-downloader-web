@@ -121,8 +121,8 @@ class Config:
             self.r2_bucket_name = data.get("r2_bucket_name", self.r2_bucket_name)
             self.r2_public_domain = data.get("r2_public_domain", self.r2_public_domain)
 
-            # Auto-enable if all R2 credentials are present
-            if self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket_name:
+            # Auto-enable R2 only if r2_enabled was not explicitly set in config
+            if "r2_enabled" not in data and self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket_name:
                 self.r2_enabled = True
         except Exception as e:
             print(f"Error loading configuration: {e}")
@@ -150,15 +150,19 @@ class Config:
         }
         try:
             os.makedirs(self.config_dir, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            tmp_path = self.config_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
+            os.replace(tmp_path, self.config_path)
         except Exception as e:
             print(f"Notice: Could not save configuration to {self.config_path}: {e}")
             
         try:
             backup_path = os.path.join(os.getcwd(), "config.json")
-            with open(backup_path, "w", encoding="utf-8") as f:
+            tmp_backup = backup_path + ".tmp"
+            with open(tmp_backup, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
+            os.replace(tmp_backup, backup_path)
         except Exception:
             pass
 
