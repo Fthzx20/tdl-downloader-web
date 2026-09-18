@@ -1,0 +1,7 @@
+aiohttp>=3.8.0
+aiofiles>=23.1.0
+mutagen>=1.46.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+boto3>=1.28.0
+imageio-ffmpeg>=0.4.9

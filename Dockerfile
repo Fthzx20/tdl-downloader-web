@@ -15,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8000
 
 # Copy and install dependencies
-COPY web_backend/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r ./requirements.txt
 
 # Copy backend application files
