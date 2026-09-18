@@ -239,6 +239,8 @@ export default function Home() {
     r2_bucket_name: "",
     r2_public_domain: "",
     r2_configured: false,
+    auto_close_transfers: true,
+    open_download_in_tab: false,
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
@@ -248,6 +250,8 @@ export default function Home() {
 
   // Tracks which task_ids have been seen as "active" at least once (for completion detection)
   const taskSeenActive = useRef<Set<string>>(new Set());
+  // Tracks any download popup windows to automatically close them when download completes
+  const downloadWindowsRef = useRef<Map<string, Window>>(new Map());
 
   // Track Selector Modal State
   const [selectedCollection, setSelectedCollection] = useState<{ type: "albums" | "playlists"; item: any } | null>(null);
@@ -269,6 +273,8 @@ export default function Home() {
           ...prev,
           ...parsed,
           quality_tier: parsed.quality_tier === "HI_RES_LOSSLESS" ? "MAX" : (parsed.quality_tier || "MAX"),
+          auto_close_transfers: parsed.auto_close_transfers !== undefined ? parsed.auto_close_transfers : true,
+          open_download_in_tab: parsed.open_download_in_tab !== undefined ? parsed.open_download_in_tab : false,
         }));
       }
     } catch {}
@@ -436,6 +442,13 @@ export default function Home() {
               isComplete: true,
             });
             taskSeenActive.current.delete(d.taskId);
+
+            // Auto-close any opened download window
+            const win = downloadWindowsRef.current.get(d.taskId);
+            if (win && !win.closed) {
+              try { win.close(); } catch {}
+              downloadWindowsRef.current.delete(d.taskId);
+            }
             return;
           }
 
@@ -493,6 +506,13 @@ export default function Home() {
               isComplete: true,
             });
             taskSeenActive.current.delete(d.taskId);
+
+            // Auto-close any opened download window
+            const win = downloadWindowsRef.current.get(d.taskId);
+            if (win && !win.closed) {
+              try { win.close(); } catch {}
+              downloadWindowsRef.current.delete(d.taskId);
+            }
             return;
           }
 
@@ -508,6 +528,13 @@ export default function Home() {
               progress: 100,
               isComplete: true,
             });
+
+            // Auto-close any opened download window
+            const win = downloadWindowsRef.current.get(d.taskId);
+            if (win && !win.closed) {
+              try { win.close(); } catch {}
+              downloadWindowsRef.current.delete(d.taskId);
+            }
             return;
           }
         } catch {
@@ -518,10 +545,9 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [activeDownloads]);
 
-  // Auto-clear completed downloads after 5 seconds
+  // Auto-clear completed downloads after 2.5s and auto-close Transfer panel
   useEffect(() => {
     const completed = activeDownloads.filter((d) => d.isComplete && !d.isError);
-    const hasErrors = activeDownloads.some((d) => d.isError);
     if (completed.length === 0) return;
 
     // Only auto-clear if there are no in-progress downloads left
@@ -529,13 +555,24 @@ export default function Home() {
     if (inProgress.length > 0) return;
 
     const timer = setTimeout(() => {
+      // Auto-close any remaining download windows if still open
+      downloadWindowsRef.current.forEach((win) => {
+        try {
+          if (!win.closed) win.close();
+        } catch {}
+      });
+      downloadWindowsRef.current.clear();
+
       setActiveDownloads((prev) => prev.filter((d) => d.isError));
-      if (!hasErrors) {
-        setShowDownloads(false);
+      if (settings.auto_close_transfers !== false) {
+        const hasErrors = activeDownloads.some((d) => d.isError);
+        if (!hasErrors) {
+          setShowDownloads(false);
+        }
       }
-    }, 5000);
+    }, 2500);
     return () => clearTimeout(timer);
-  }, [activeDownloads]);
+  }, [activeDownloads, settings.auto_close_transfers]);
 
   /* ─── State Helpers ─── */
   const updateDownload = useCallback(
@@ -673,14 +710,27 @@ export default function Home() {
     ]);
 
     try {
-      // Trigger native browser download directly to stream to disk without loading file chunks into JS heap
-      const a = document.createElement("a");
-      a.href = url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      if (settings.open_download_in_tab) {
+        // Open in new tab and auto-close when download completes
+        const win = window.open(url, "_blank");
+        if (win) {
+          downloadWindowsRef.current.set(taskId, win);
+        }
+      } else {
+        // Default: Stream directly to browser disk via hidden iframe
+        // Prevents unwanted blank tabs from ever opening or cluttering the browser!
+        const iframe = document.createElement("iframe");
+        iframe.style.display = "none";
+        iframe.src = url;
+        document.body.appendChild(iframe);
+        setTimeout(() => {
+          try {
+            if (document.body.contains(iframe)) {
+              document.body.removeChild(iframe);
+            }
+          } catch {}
+        }, 180000);
+      }
 
       toast.success(`Queued download for "${itemTitle}"`);
     } catch (err: any) {
@@ -695,6 +745,12 @@ export default function Home() {
   };
 
   const handleCancelDownload = (taskId: string) => {
+    const win = downloadWindowsRef.current.get(taskId);
+    if (win && !win.closed) {
+      try { win.close(); } catch {}
+      downloadWindowsRef.current.delete(taskId);
+    }
+
     const target = activeDownloads.find((d) => d.taskId === taskId);
     if (target && target.abortController) {
       try {
@@ -1377,7 +1433,27 @@ export default function Home() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() =>
+                  handleSettingChange(
+                    "auto_close_transfers",
+                    settings.auto_close_transfers === false ? true : false
+                  )
+                }
+                className={`text-[10px] px-2 py-0.5 rounded-full border font-medium transition-all ${
+                  settings.auto_close_transfers !== false
+                    ? "bg-primary/15 border-primary/30 text-primary"
+                    : "bg-white/[0.04] border-white/[0.08] text-muted-foreground/60 hover:text-muted-foreground"
+                }`}
+                title={
+                  settings.auto_close_transfers !== false
+                    ? "Auto-close pop-up is ON: Panel will close automatically when done"
+                    : "Auto-close pop-up is OFF: Panel will stay open"
+                }
+              >
+                Auto-close: {settings.auto_close_transfers !== false ? "On" : "Off"}
+              </button>
               <Button
                 variant="ghost"
                 size="icon"
@@ -1403,11 +1479,22 @@ export default function Home() {
                 size="icon"
                 className="w-7 h-7 rounded-full hover:bg-white/10"
                 onClick={() => setShowDownloads(false)}
+                title="Close transfers panel"
               >
                 <X className="w-3.5 h-3.5" />
               </Button>
             </div>
           </div>
+
+          {/* Download Complete & Auto-closing notice */}
+          {pendingCount === 0 &&
+            activeDownloads.some((d) => d.isComplete && !d.isError) &&
+            settings.auto_close_transfers !== false && (
+              <div className="px-3.5 py-1.5 bg-emerald-500/10 border-b border-emerald-500/20 text-[11px] text-emerald-400 flex items-center gap-1.5 shrink-0 animate-fade-in">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>All downloads complete! Auto-closing panel...</span>
+              </div>
+            )}
 
           {/* Download Items */}
           <div className="overflow-y-auto p-3 space-y-2 flex-1">
@@ -1531,6 +1618,8 @@ function SettingsDialog({
     r2_bucket_name?: string;
     r2_public_domain?: string;
     r2_configured?: boolean;
+    auto_close_transfers?: boolean;
+    open_download_in_tab?: boolean;
   };
   onSettingChange: (key: string, value: any) => void;
   userInfo?: { username?: string; user_id?: string; country?: string } | null;
@@ -1636,6 +1725,71 @@ function SettingsDialog({
               }`}
             />
           </button>
+        </div>
+
+        {/* Transfer & Pop-up Preferences */}
+        <div className="space-y-3 pt-2 border-t border-white/[0.06]">
+          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
+            Transfer &amp; Download Behavior
+          </Label>
+
+          {/* Auto-Close Transfer Pop-up */}
+          <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]">
+            <div>
+              <Label className="text-sm font-medium cursor-pointer">
+                Auto-Close Transfer Pop-up
+              </Label>
+              <p className="text-[11px] text-muted-foreground/60 mt-0.5">
+                Automatically close panel when all downloads finish
+              </p>
+            </div>
+            <button
+              onClick={() =>
+                onSettingChange(
+                  "auto_close_transfers",
+                  settings.auto_close_transfers === false ? true : false
+                )
+              }
+              className={`w-11 h-6 rounded-full relative transition-colors ${
+                settings.auto_close_transfers !== false ? "bg-primary" : "bg-white/10"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                  settings.auto_close_transfers !== false ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Silent Direct Download / No Blank Tabs */}
+          <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]">
+            <div>
+              <Label className="text-sm font-medium cursor-pointer">
+                Silent Direct Download
+              </Label>
+              <p className="text-[11px] text-muted-foreground/60 mt-0.5">
+                Stream downloads directly without opening blank new tabs
+              </p>
+            </div>
+            <button
+              onClick={() =>
+                onSettingChange(
+                  "open_download_in_tab",
+                  !settings.open_download_in_tab
+                )
+              }
+              className={`w-11 h-6 rounded-full relative transition-colors ${
+                !settings.open_download_in_tab ? "bg-primary" : "bg-white/10"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                  !settings.open_download_in_tab ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
     </DialogContent>
