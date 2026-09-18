@@ -1,0 +1,7 @@
+﻿# StackHost Deployment Configuration
+# Documentation: https://stackhost.org/docs
+runtime: python
+commands:
+  build:
+    - "pip install --no-cache-dir -r web_backend/requirements.txt"
+  start: "python web_backend/server.py"

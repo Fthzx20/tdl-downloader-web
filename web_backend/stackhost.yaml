@@ -1,0 +1,7 @@
+﻿# StackHost Deployment Configuration (when deployed with root directory: web_backend)
+# Documentation: https://stackhost.org/docs
+runtime: python
+commands:
+  build:
+    - "pip install --no-cache-dir -r requirements.txt"
+  start: "python server.py"

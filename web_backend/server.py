@@ -1,5 +1,8 @@
 import re
 import os
+import sys
+# Ensure module resolution works whether run from root or web_backend
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shutil
 import asyncio
 import zipfile
